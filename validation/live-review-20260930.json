@@ -1,0 +1,81 @@
+{
+  "date": "2026-09-30",
+  "scenario": "Installed Codex worker and pi reviewer exchange automatic messages on an isolated tmux server and temporary project.",
+  "environment": {
+    "os": "macOS arm64",
+    "go": "1.27.1",
+    "tmux": "3.6a",
+    "codex": "0.159.2",
+    "pi": "0.99.1"
+  },
+  "acceptance": {
+    "file": "hello.txt",
+    "expected_text": "2mux automatic review works\n",
+    "actual_text": "2mux automatic review works\n",
+    "byte_length": 28,
+    "hex": "326d7578206175746f6d617469632072657669657720776f726b730a",
+    "result": "passed"
+  },
+  "delivery_count": 7,
+  "messages": [
+    {
+      "id": "3aa941049166840c34d5f3388a7cbd60",
+      "from": "user",
+      "to": "worker",
+      "text": "Run a 2mux integration test only in this temporary project. Ensure hello.txt contains exactly \"2mux automatic review works\" followed by one newline and check its actual bytes. Then invoke your exact 2mux send --queue command to request reviewer verification of the file and this acceptance criterion. Reviewer must inspect the actual file and send APPROVED or actionable CORRECTIONS through its own exact 2mux send --queue command. When approval arrives, acknowledge completion locally and stop the conversation. Do not perform unrelated work or access other project files.",
+      "created": "2026-09-30T11:55:05.144795Z",
+      "status": "delivered"
+    },
+    {
+      "id": "c19a3633aada1d4b1eebf7dfb952f7d9",
+      "from": "worker",
+      "to": "reviewer",
+      "text": "Я WORKER. Перевірив /private/tmp/2mux-live-1cc7kxnb/project: тут лише hello.txt з текстом «2mux automatic review works»; Git-репозиторій та конкретне завдання відсутні. Файли не змінював, тести не запускав. Запитав у користувача, яку саме зміну реалізувати. Якщо у тебе є конкретне завдання або критерії прийняття, надішли їх.\nЗвичайний send із role prompt спершу повернув «2mux is not running in this directory», оскільки shell не отримав PATH до fixture tmux. Сесію підтвердив через /private/tmp/2mux-live-1cc7kxnb/bin/tmux; вона активна, reviewer pane %1, bridge running. Це повідомлення надсилаю через явно визначену приватну queue адресу, як підтримує поточний CLI.\n",
+      "created": "2026-09-30T11:55:19.154219Z",
+      "status": "delivered"
+    },
+    {
+      "id": "bb2fef1833a1e7599184f4501d88b2e6",
+      "from": "worker",
+      "to": "reviewer",
+      "text": "Please verify the actual file /private/tmp/2mux-live-1cc7kxnb/project/hello.txt. Changed file: hello.txt only. Acceptance criterion: the file contains exactly the ASCII text \"2mux automatic review works\" followed by exactly one newline, with no other bytes. Worker byte check passed: b'2mux automatic review works\\n', length 28, hex 326d7578206175746f6d617469632072657669657720776f726b730a. Inspect the actual file independently and send APPROVED or actionable CORRECTIONS through your own exact 2mux send --queue command. This integration test is limited to the temporary project; do not access unrelated project files.\n",
+      "created": "2026-09-30T11:55:32.896865Z",
+      "status": "delivered"
+    },
+    {
+      "id": "0b4bf90b587ba5e2329f4541dd941eb8",
+      "from": "reviewer",
+      "to": "worker",
+      "text": "APPROVED — перевірив робочу директорію: є лише `hello.txt` із текстом `2mux automatic review works`; Git-репозиторію, diff, тестів і конкретного завдання немає. Змін для рев’ю немає; очікування уточнення від користувача є правильним.\n",
+      "created": "2026-09-30T11:55:41.767024Z",
+      "status": "delivered"
+    },
+    {
+      "id": "bb2838c3c86e10b3d2586e5a90a5963b",
+      "from": "reviewer",
+      "to": "worker",
+      "text": "APPROVED — незалежно прочитав `/private/tmp/2mux-live-1cc7kxnb/project/hello.txt` як bytes. Вміст точно дорівнює `b'2mux automatic review works\\n'` (28 байтів, один завершальний LF, інших байтів немає).\n",
+      "created": "2026-09-30T11:56:01.873905Z",
+      "status": "delivered"
+    },
+    {
+      "id": "22496bf80dcdee6e53d71a235a53a258",
+      "from": "worker",
+      "to": "reviewer",
+      "text": "REQUEST REVIEW: завдання користувача через 2mux тепер отримано. Виконуємо лише integration test у /private/tmp/2mux-live-1cc7kxnb/project.\nКритерій прийняття: hello.txt має містити точно ASCII-текст \"2mux automatic review works\", після якого рівно один newline (LF), без додаткових байтів.\nЗмінені файли: немає, бо поточний hello.txt уже відповідає критерію.\nПеревірка WORKER: Python read_bytes() + assert actual == b'2mux automatic review works\\n' успішна, 28 bytes; hex 326d7578206175746f6d617469632072657669657720776f726b730a.\nБудь ласка, самостійно прочитай фактичні байти hello.txt і надішли APPROVED або actionable CORRECTIONS через власну точну 2mux send --queue команду. Після APPROVED я підтверджу завершення локально й зупиню розмову. Не виконуй сторонніх робіт та не відкривай файлів інших проєктів.\n",
+      "created": "2026-09-30T11:56:29.555436Z",
+      "status": "delivered"
+    },
+    {
+      "id": "15e455ef81e1787a7aa612ce0660749d",
+      "from": "reviewer",
+      "to": "worker",
+      "text": "APPROVED — самостійна повторна перевірка фактичних байтів `hello.txt` успішна: рівно `b'2mux automatic review works\\n'`, 28 байтів, hex `326d7578206175746f6d617469632072657669657720776f726b730a`.\n",
+      "created": "2026-09-30T11:56:49.520529Z",
+      "status": "delivered"
+    }
+  ],
+  "worker_observation": "APPROVED received; worker reported test completion.",
+  "scope": "Tiny file task and successful automatic review with installed CLIs; not a general guarantee of model output correctness.",
+  "cleanup": "The temporary tmux session and project were removed after the agents finished."
+}
