@@ -10,9 +10,18 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"syscall"
 	"time"
+)
+
+const (
+	// Health is written after every delivery attempt; one attempt runs several
+	// bounded tmux and ps calls, so allow a few of them before calling it stale.
+	healthStaleAfter = 15 * time.Second
+	// The bridge exits at once when its session is gone, but tolerates tmux
+	// errors that do not prove that, such as a timeout under load.
+	transientFailureLimit = 30 * time.Second
+	archiveAfter          = 24 * time.Hour
 )
 
 type bridgeHealth struct {
@@ -39,6 +48,23 @@ func tryLock(path string) (*os.File, bool, error) {
 	return f, true, nil
 }
 
+// waitLock retries a nonblocking flock until timeout, for locks whose
+// holders finish quickly, such as a delivery batch or another start.
+func waitLock(path string, timeout time.Duration, busy string) (*os.File, error) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		f, ok, err := tryLock(path)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			return f, nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return nil, errors.New(busy)
+}
+
 func bridgeRunning(dir string) (bool, error) {
 	f, locked, err := tryLock(filepath.Join(dir, "bridge.lock"))
 	if f != nil {
@@ -58,21 +84,9 @@ func readHealth(dir string) (bridgeHealth, error) {
 
 func ensureBridge(name, cwd, dir string) error {
 	// Serialize concurrent starts, including the period before the child locks.
-	var lock *os.File
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		f, ok, err := tryLock(filepath.Join(dir, "start.lock"))
-		if err != nil {
-			return err
-		}
-		if ok {
-			lock = f
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	if lock == nil {
-		return errors.New("another 2mux start is still in progress")
+	lock, err := waitLock(filepath.Join(dir, "start.lock"), 5*time.Second, "another 2mux start is still in progress")
+	if err != nil {
+		return err
 	}
 	defer lock.Close()
 	running, err := bridgeRunning(dir)
@@ -81,7 +95,7 @@ func ensureBridge(name, cwd, dir string) error {
 	}
 	if running {
 		h, err := readHealth(dir)
-		if err != nil || time.Since(h.Updated) > 5*time.Second {
+		if err != nil || time.Since(h.Updated) > healthStaleAfter {
 			return errors.New("bridge is locked but unresponsive; inspect '2mux status'")
 		}
 		return nil
@@ -104,10 +118,10 @@ func ensureBridge(name, cwd, dir string) error {
 	}
 	pid := cmd.Process.Pid
 	_ = cmd.Process.Release()
-	deadline = time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		h, err := readHealth(dir)
-		if err == nil && h.PID == pid && time.Since(h.Updated) < 5*time.Second {
+		if err == nil && h.PID == pid && time.Since(h.Updated) < healthStaleAfter {
 			return nil
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -127,30 +141,64 @@ func runBridge(name, cwd, dir string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	h := bridgeHealth{PID: os.Getpid()}
+	writeHealth := func() {
+		h.Updated = time.Now().UTC()
+		// A failed write makes the bridge look unresponsive to the CLI, which
+		// is reported to the operator; it is not a reason to stop delivering.
+		if err := writeJSON(filepath.Join(dir, "health.json"), h); err != nil {
+			fmt.Fprintln(os.Stderr, "write health:", err)
+		}
+	}
 	h.Updated = time.Now().UTC()
 	if err := writeJSON(filepath.Join(dir, "health.json"), h); err != nil {
 		return err
 	}
+	panes := paneWatch{}
+	var failingSince, lastArchive time.Time
 	ticker := time.NewTicker(300 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		// The directory token distinguishes a recreated session with the same name.
 		if err := verifyRuntime(name, cwd, dir); err != nil {
-			return nil
-		}
-		h.LastError = ""
-		if err := deliverQueue(dir, func(m message) error {
-			pane, err := rolePane(name, m.To)
-			if err != nil {
-				return err
+			if runtimeGone(name, cwd, dir) {
+				return nil
 			}
-			return sendText(pane, formatMessage(m))
-		}); err != nil {
-			h.LastError = err.Error()
-		}
-		h.Updated = time.Now().UTC()
-		if err := writeJSON(filepath.Join(dir, "health.json"), h); err != nil {
-			return err
+			if failingSince.IsZero() {
+				failingSince = time.Now()
+			}
+			if time.Since(failingSince) > transientFailureLimit {
+				return fmt.Errorf("cannot verify session for %s: %w", transientFailureLimit, err)
+			}
+			h.LastError = "cannot verify session: " + err.Error()
+			writeHealth()
+		} else {
+			failingSince = time.Time{}
+			h.LastError = ""
+			err := deliverQueue(dir, func(m message) error {
+				pane, err := rolePane(name, m.To)
+				if err != nil {
+					return err
+				}
+				return panes.ready(pane, time.Now())
+			}, func(m message) error {
+				// Keep health fresh within a batch of several deliveries.
+				writeHealth()
+				pane, err := rolePane(name, m.To)
+				if err != nil {
+					return err
+				}
+				return sendText(pane, formatMessage(m))
+			})
+			if err != nil {
+				h.LastError = err.Error()
+			}
+			writeHealth()
+			if time.Since(lastArchive) > time.Minute {
+				lastArchive = time.Now()
+				if err := archiveDelivered(dir, archiveAfter); err != nil {
+					fmt.Fprintln(os.Stderr, "archive delivered records:", err)
+				}
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -160,109 +208,19 @@ func runBridge(name, cwd, dir string) error {
 	}
 }
 
-type uncertainDelivery struct{ err error }
-
-func (e uncertainDelivery) Error() string { return e.err.Error() }
-func (e uncertainDelivery) Unwrap() error { return e.err }
-
-func sendText(paneID, text string) error {
-	// Do not paste agent output into a shell, editor, dead pane or copy mode.
-	if err := paneCanReceive(paneID); err != nil {
-		return err
-	}
-	id, err := randomID()
+// runtimeGone reports whether this bridge's session definitely no longer
+// exists or now belongs to a different runtime. tmux errors that do not
+// prove either, such as timeouts, return false.
+func runtimeGone(name, cwd, dir string) bool {
+	exists, err := sessionExists(name)
 	if err != nil {
-		return err
-	}
-	buffer := "2mux-" + id
-	if _, err := tmuxInput(strings.NewReader(text), "load-buffer", "-b", buffer, "-"); err != nil {
-		return err
-	}
-	defer tmux("delete-buffer", "-b", buffer)
-	if err := paneCanReceive(paneID); err != nil {
-		return err
-	}
-	// Bracketed paste preserves multiline feedback as one prompt. Keep LF bytes.
-	if _, err := tmux("paste-buffer", "-d", "-p", "-r", "-b", buffer, "-t", paneID); err != nil {
-		return uncertainDelivery{err}
-	}
-	// TUIs must finish handling the paste before the submit key arrives.
-	time.Sleep(150 * time.Millisecond)
-	if err := paneCanReceive(paneID); err != nil {
-		return uncertainDelivery{err}
-	}
-	if _, err := tmux("send-keys", "-t", paneID, "Enter"); err != nil {
-		return uncertainDelivery{err}
-	}
-	return nil
-}
-
-func paneCanReceive(paneID string) error {
-	output, err := tmux("display-message", "-p", "-t", paneID,
-		"#{pane_dead}\t#{pane_in_mode}\t#{pane_input_off}\t#{pane_tty}")
-	if err != nil {
-		return err
-	}
-	fields := strings.Split(output, "\t")
-	if len(fields) != 4 || fields[0] != "0" || fields[1] != "0" || fields[2] != "0" {
-		return fmt.Errorf("pane %s is dead, in copy mode, or has input disabled", paneID)
-	}
-	// node alone is not evidence of pi. Inspect only foreground processes on
-	// this terminal; a shell that remains after the agent exits is rejected.
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "ps", "-ww", "-t", strings.TrimPrefix(fields[3], "/dev/"), "-o", "stat=,ucomm=,args=")
-	processes, err := cmd.Output()
-	if err != nil {
-		return fmt.Errorf("inspect foreground agent in pane %s: %w", paneID, err)
-	}
-	if !hasForegroundAgent(string(processes)) {
-		return fmt.Errorf("pane %s is waiting for an interactive Codex or pi agent", paneID)
-	}
-	return nil
-}
-
-func hasForegroundAgent(processes string) bool {
-	for _, line := range strings.Split(processes, "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 3 || !strings.Contains(fields[0], "+") {
-			continue
-		}
-		program := filepath.Base(fields[1])
-		if program == "codex" || program == "pi" {
-			return true
-		}
-		if program == "node" || program == "bun" {
-			// Current pi sets process.title to "pi", replacing its argv on Unix.
-			if len(fields) == 3 && fields[2] == "pi" {
-				return true
-			}
-			// Only the script entry point identifies the agent. A pi path in
-			// app arguments or runtime options must not authorize a paste.
-			scriptIndex := 3
-			if program == "bun" && len(fields) > scriptIndex && fields[scriptIndex] == "run" {
-				scriptIndex++
-			}
-			if len(fields) > scriptIndex && isPiEntrypoint(fields[scriptIndex]) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func isPiEntrypoint(path string) bool {
-	if strings.HasPrefix(path, "-") {
 		return false
 	}
-	if filepath.IsAbs(path) && filepath.Base(path) == "pi" {
-		resolved, err := filepath.EvalSymlinks(path)
-		if err != nil {
-			return false
-		}
-		path = resolved
+	if !exists {
+		return true
 	}
-	return strings.Contains(path, "/pi-coding-agent/") && strings.HasSuffix(path, ".js")
+	// The session answered, so a repeated marker mismatch is not transient.
+	return verifyRuntime(name, cwd, dir) != nil
 }
 
 func stopBridge(dir string) error {
@@ -274,7 +232,7 @@ func stopBridge(dir string) error {
 	if err != nil {
 		return err
 	}
-	if h.PID <= 0 || time.Since(h.Updated) > 5*time.Second {
+	if h.PID <= 0 || time.Since(h.Updated) > healthStaleAfter {
 		return errors.New("cannot safely identify bridge process; bridge exits when session disappears")
 	}
 	p, err := os.FindProcess(h.PID)
@@ -305,7 +263,7 @@ func bridgeDescription(dir string) string {
 		return "stopped (run '2mux start' to restart)"
 	}
 	h, err := readHealth(dir)
-	if err != nil || time.Since(h.Updated) > 5*time.Second {
+	if err != nil || time.Since(h.Updated) > healthStaleAfter {
 		return "unresponsive"
 	}
 	s := "running (PID " + strconv.Itoa(h.PID) + ")"

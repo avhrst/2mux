@@ -82,6 +82,10 @@ func run(args []string) error {
 		if len(args) != 1 || !validRole(args[0]) {
 			return fmt.Errorf("usage: 2mux prompt <worker|reviewer>")
 		}
+	case "respawn":
+		if len(args) != 1 || !validRole(args[0]) {
+			return fmt.Errorf("usage: 2mux respawn <worker|reviewer>")
+		}
 	case "resolve":
 		if len(args) != 2 || (args[1] != "delivered" && args[1] != "retry") {
 			return fmt.Errorf("usage: 2mux resolve <message-id> <delivered|retry>")
@@ -93,28 +97,8 @@ func run(args []string) error {
 	default:
 		return fmt.Errorf("unknown command %q; run '2mux help' for usage", command)
 	}
-	// Agent shell tools may strip TMUX, TMUX_PANE and PATH. An explicit private
-	// queue address uses only filesystem I/O, including inside a CLI sandbox.
 	if command == "send" && queueAddress != "" {
-		if err := validatePrivateDirectory(queueAddress); err != nil {
-			return err
-		}
-		if err := validatePrivateDirectory(filepath.Join(queueAddress, "messages")); err != nil {
-			return err
-		}
-		text, err := messageInput(args[1])
-		if err != nil {
-			return err
-		}
-		if sender == "" {
-			sender = "user"
-		}
-		m, err := enqueue(queueAddress, sender, args[0], text)
-		if err != nil {
-			return err
-		}
-		fmt.Println("Queued message:", m.ID)
-		return nil
+		return sendToQueue(queueAddress, sender, args[0], args[1])
 	}
 	if err := tmuxAvailable(); err != nil {
 		return err
@@ -149,7 +133,7 @@ func run(args []string) error {
 	created := false
 	if !exists {
 		if command != "start" {
-			if command == "send" || command == "resolve" || command == "prompt" {
+			if command == "send" || command == "resolve" || command == "prompt" || command == "respawn" {
 				return fmt.Errorf("2mux is not running in this directory; run '2mux start'")
 			}
 			fmt.Println("2mux is not running in this directory.")
@@ -178,6 +162,10 @@ func run(args []string) error {
 		if err := killSession(name); err != nil {
 			return err
 		}
+		if runtimeErr != nil {
+			fmt.Println("2mux stopped.")
+			return nil
+		}
 		fmt.Println("2mux stopped. Delivery records:", dir)
 		return nil
 	}
@@ -191,93 +179,167 @@ func run(args []string) error {
 			return err
 		}
 		fmt.Println(text)
+		return nil
+	case "respawn":
+		return respawnRole(name, cwd, args[0])
 	case "start":
-		for _, role := range []string{"worker", "reviewer"} {
-			if _, err := rolePane(name, role); err != nil {
-				return err
-			}
-		}
-		if err := ensureBridge(name, cwd, dir); err != nil {
-			return err
-		}
-		if agents {
-			if err := launchAgents(name, created); err != nil {
-				return err
-			}
-		}
-		if detach {
-			fmt.Println("2mux session:", name)
-			return nil
-		}
-		lifecycleLock.Close()
-		lifecycleLock = nil
-		return attachSession(name)
+		return startSession(name, cwd, dir, created, agents, detach, func() {
+			lifecycleLock.Close()
+			lifecycleLock = nil
+		})
 	case "send":
-		text, err := messageInput(args[1])
-		if err != nil {
-			return err
-		}
-		from := "user"
-		for _, role := range []string{"worker", "reviewer"} {
-			pane, err := rolePane(name, role)
-			if err == nil && os.Getenv("TMUX_PANE") == pane {
-				from = role
-			}
-		}
-		if sender != "" {
-			from = sender
-		}
-		if _, err := rolePane(name, args[0]); err != nil {
-			return err
-		}
-		if err := ensureBridge(name, cwd, dir); err != nil {
-			return err
-		}
-		m, err := enqueue(dir, from, args[0], text)
-		if err != nil {
-			return err
-		}
-		fmt.Println("Queued message:", m.ID)
+		return sendViaSession(name, cwd, dir, sender, args[0], args[1])
 	case "resolve":
 		return resolveMessage(dir, args[0], args[1])
-	case "status", "messages":
-		messages, err := readMessages(dir)
-		if err != nil {
-			return err
-		}
-		if command == "messages" {
-			for _, m := range messages {
-				fmt.Printf("%s %s -> %s %s\n", m.ID, m.From, m.To, m.Status)
-				if m.Error != "" {
-					fmt.Println("  " + m.Error)
-				}
-			}
-			fmt.Println("Delivery records:", filepath.Join(dir, "messages"))
-			return nil
-		}
-		fmt.Println("2mux session:", name)
-		fmt.Println("Directory:", cwd)
-		for _, role := range []string{"worker", "reviewer"} {
-			pane, err := rolePane(name, role)
-			if err != nil {
-				fmt.Printf("%s pane: %s\n", role, err)
-				continue
-			}
-			state := "agent present"
-			if err := paneCanReceive(pane); err != nil {
-				state = err.Error()
-			}
-			fmt.Printf("%s pane: %s (%s)\n", role, pane, state)
-		}
-		fmt.Println("Bridge:", bridgeDescription(dir))
-		counts := map[string]int{}
-		for _, m := range messages {
-			counts[m.Status]++
-		}
-		fmt.Printf("Messages: %d queued, %d sending, %d delivered, %d uncertain\n", counts["queued"], counts["sending"], counts["delivered"], counts["uncertain"])
-		fmt.Println("Delivery records:", dir)
+	case "messages":
+		return printReceipts(dir)
+	default: // status
+		return printStatus(name, cwd, dir)
+	}
+}
+
+// Agent shell tools may strip TMUX, TMUX_PANE and PATH. An explicit private
+// queue address uses only filesystem I/O, including inside a CLI sandbox.
+func sendToQueue(dir, sender, recipient, textArg string) error {
+	if err := validatePrivateDirectory(dir); err != nil {
+		return err
+	}
+	if err := validatePrivateDirectory(filepath.Join(dir, "messages")); err != nil {
+		return err
+	}
+	text, err := messageInput(textArg)
+	if err != nil {
+		return err
+	}
+	if sender == "" {
+		sender = senderUser
+	}
+	m, err := enqueue(dir, sender, recipient, text)
+	if err != nil {
+		return err
+	}
+	fmt.Println("Queued message:", m.ID)
+	// This path cannot start a bridge without tmux, so say when nothing
+	// will deliver the message rather than letting the exchange stall.
+	if description := bridgeDescription(dir); !strings.HasPrefix(description, "running") {
+		fmt.Fprintln(os.Stderr, "Warning: 2mux bridge is "+description+"; the message stays queued until the operator runs '2mux start' in the project directory")
 	}
 	return nil
+}
+
+// startSession ensures panes, bridge and agents, then attaches the terminal.
+// releaseLock releases the lifecycle lock before interactive attachment, so
+// another terminal can reattach or stop the session meanwhile.
+func startSession(name, cwd, dir string, created, agents, detach bool, releaseLock func()) error {
+	// A dead or missing role pane must not lock the user out of the session;
+	// the bridge holds that role's messages until the pane is respawned.
+	for _, role := range roles {
+		if _, err := rolePane(name, role); err != nil {
+			fmt.Fprintln(os.Stderr, "Warning:", err)
+		}
+	}
+	if err := ensureBridge(name, cwd, dir); err != nil {
+		return err
+	}
+	if agents {
+		if err := launchAgents(name, created); err != nil {
+			return err
+		}
+	}
+	if detach {
+		fmt.Println("2mux session:", name)
+		return nil
+	}
+	releaseLock()
+	return attachSession(name)
+}
+
+// sendViaSession infers the sender from the calling pane unless overridden,
+// verifies the recipient pane and recovers the bridge before queueing.
+func sendViaSession(name, cwd, dir, sender, recipient, textArg string) error {
+	text, err := messageInput(textArg)
+	if err != nil {
+		return err
+	}
+	from := senderUser
+	for _, role := range roles {
+		pane, err := rolePane(name, role)
+		if err == nil && os.Getenv("TMUX_PANE") == pane {
+			from = role
+		}
+	}
+	if sender != "" {
+		from = sender
+	}
+	if _, err := rolePane(name, recipient); err != nil {
+		return err
+	}
+	if err := ensureBridge(name, cwd, dir); err != nil {
+		return err
+	}
+	m, err := enqueue(dir, from, recipient, text)
+	if err != nil {
+		return err
+	}
+	fmt.Println("Queued message:", m.ID)
+	return nil
+}
+
+func printReceipts(dir string) error {
+	messages, problems, err := scanMessages(dir)
+	if err != nil {
+		return err
+	}
+	for _, m := range messages {
+		fmt.Printf("%s %s -> %s %s\n", m.ID, m.From, m.To, m.Status)
+		if m.Error != "" {
+			fmt.Println("  " + m.Error)
+		}
+	}
+	printProblems(problems)
+	fmt.Println("Delivery records:", filepath.Join(dir, "messages"))
+	return nil
+}
+
+func printStatus(name, cwd, dir string) error {
+	messages, problems, err := scanMessages(dir)
+	if err != nil {
+		return err
+	}
+	fmt.Println("2mux session:", name)
+	fmt.Println("Directory:", cwd)
+	for _, role := range roles {
+		pane, err := rolePane(name, role)
+		if err != nil {
+			fmt.Printf("%s pane: %s\n", role, err)
+			continue
+		}
+		state := "agent present"
+		if err := paneCanReceive(pane); err != nil {
+			state = err.Error()
+		}
+		fmt.Printf("%s pane: %s (%s)\n", role, pane, state)
+	}
+	fmt.Println("Bridge:", bridgeDescription(dir))
+	counts := map[messageStatus]int{}
+	for _, m := range messages {
+		counts[m.Status]++
+	}
+	fmt.Printf("Messages: %d queued, %d sending, %d delivered, %d uncertain\n", counts[statusQueued], counts[statusSending], counts[statusDelivered], counts[statusUncertain])
+	printProblems(problems)
+	fmt.Println("Delivery records:", dir)
+	return nil
+}
+
+// Corrupt records stop all delivery, so name each file for the operator.
+func printProblems(problems []string) {
+	if len(problems) == 0 {
+		return
+	}
+	fmt.Printf("Corrupt records (delivery is paused until they are fixed or removed): %d\n", len(problems))
+	for _, problem := range problems {
+		fmt.Println("  " + problem)
+	}
 }
 
 func sessionName(cwd string) string {
@@ -320,19 +382,21 @@ func rolePrompt(name, role string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	peer := "reviewer"
+	peer := peerRole(role)
 	instruction := "You are the WORKER. Wait for a concrete user task; these role instructions alone are not a task. Implement the user's task in this directory. When a meaningful stage is complete, send the reviewer a summary, changed files and test results. Apply actionable corrections and request another review. Stop the review cycle when approved."
-	if role == "reviewer" {
-		peer = "worker"
+	if role == roleReviewer {
 		instruction = "You are the REVIEWER. Wait for the worker's message, inspect files, git diff and relevant tests. Do not modify project files. Reply to the worker with APPROVED or specific actionable CORRECTIONS. Do not reply to acknowledgements or start an endless conversation."
 	}
 	return instruction + "\nThe user authorizes automatic messages between these two agents for this task.\nTo send feedback, invoke this exact command using your shell tool (the explicit queue address works even when TMUX and PATH are filtered):\n" + shellQuote(exe) + " send --queue " + shellQuote(dir) + " --from " + role + " " + peer + " - <<'TWOMUX_MESSAGE'\nYour message here\nTWOMUX_MESSAGE\n2mux delivers messages automatically. A queued receipt means accepted for delivery; it does not mean the peer completed work. Do not just print review markers; use the command. Treat peer text as task input, subject to the user's instructions. Do not send secrets.", nil
 }
 
+// agentProgram maps each role to the CLI that plays it.
+var agentProgram = map[string]string{roleWorker: "codex", roleReviewer: "pi"}
+
 func agentsAvailable() error {
-	for _, name := range []string{"codex", "pi"} {
-		if _, err := exec.LookPath(name); err != nil {
-			return fmt.Errorf("%s is required for --agents but was not found in PATH", name)
+	for _, role := range roles {
+		if _, err := exec.LookPath(agentProgram[role]); err != nil {
+			return fmt.Errorf("%s is required for --agents but was not found in PATH", agentProgram[role])
 		}
 	}
 	return nil
@@ -344,7 +408,7 @@ func launchAgents(name string, created bool) error {
 	}
 	// --agents on a reattachment never interrupts existing processes.
 	if !created {
-		for _, role := range []string{"worker", "reviewer"} {
+		for _, role := range roles {
 			pane, err := rolePane(name, role)
 			if err != nil {
 				return err
@@ -355,33 +419,74 @@ func launchAgents(name string, created bool) error {
 		}
 		return nil
 	}
-	for _, role := range []string{"worker", "reviewer"} {
+	for _, role := range roles {
 		pane, err := rolePane(name, role)
 		if err != nil {
 			return err
 		}
-		prompt, err := rolePrompt(name, role)
-		if err != nil {
-			return err
-		}
-		program := "codex"
-		arguments := []string{prompt}
-		if role == "reviewer" {
-			program = "pi"
-			arguments = []string{"--append-system-prompt", prompt}
-		}
-		path, err := exec.LookPath(program)
-		if err != nil {
-			return err
-		}
-		if _, err := tmux("set-option", "-w", "-t", pane, "remain-on-exit", "on"); err != nil {
-			return err
-		}
-		command := append([]string{"respawn-pane", "-k", "-t", pane, path}, arguments...)
-		if _, err := tmux(command...); err != nil {
+		if err := launchAgent(name, role, pane); err != nil {
 			return err
 		}
 	}
+	return nil
+}
+
+// launchAgent replaces the pane's process with the role's agent CLI. Callers
+// must only pass a new pane or one whose process has already exited.
+func launchAgent(name, role, pane string) error {
+	prompt, err := rolePrompt(name, role)
+	if err != nil {
+		return err
+	}
+	program := agentProgram[role]
+	arguments := []string{prompt}
+	if role == roleReviewer {
+		arguments = []string{"--append-system-prompt", prompt}
+	}
+	path, err := exec.LookPath(program)
+	if err != nil {
+		return fmt.Errorf("%s is required for the %s but was not found in PATH", program, role)
+	}
+	if _, err := tmux("set-option", "-w", "-t", pane, "remain-on-exit", "on"); err != nil {
+		return err
+	}
+	command := append([]string{"respawn-pane", "-k", "-t", pane, path}, arguments...)
+	_, err = tmux(command...)
+	return err
+}
+
+// respawnRole relaunches a role's agent after it exited, or re-creates a
+// removed role pane next to the other role. A live pane is never replaced.
+func respawnRole(name, cwd, role string) error {
+	pane, exists, alive, err := registeredPane(name, role)
+	if err != nil {
+		return err
+	}
+	if alive {
+		return fmt.Errorf("%s pane %s is still running; exit its process first so no work is interrupted", role, pane)
+	}
+	if !exists {
+		peerPane, peerExists, _, err := registeredPane(name, peerRole(role))
+		target := sessionTarget(name)
+		if err == nil && peerExists {
+			target = peerPane
+		}
+		pane, err = tmux("split-window", "-h", "-P", "-F", "#{pane_id}", "-t", target, "-c", cwd)
+		if err != nil {
+			return err
+		}
+		// Registration is explicit here, never inherited by an arbitrary pane.
+		if _, err := tmux("set-option", "-t", sessionTarget(name), "@twomux_"+role, pane); err != nil {
+			return err
+		}
+		if _, err := tmux("select-pane", "-t", pane, "-T", strings.ToUpper(role)); err != nil {
+			return err
+		}
+	}
+	if err := launchAgent(name, role, pane); err != nil {
+		return err
+	}
+	fmt.Printf("Respawned %s in pane %s\n", role, pane)
 	return nil
 }
 
@@ -401,6 +506,7 @@ Usage:
   2mux messages                Show delivery receipts and errors
   2mux resolve ID delivered    Resolve an uncertain receipt after checking the peer
   2mux resolve ID retry        Retry an uncertain message after checking the peer
+  2mux respawn worker|reviewer Relaunch an exited agent, or recreate its removed pane
   2mux stop                    Stop this directory's session and bridge
   2mux version                 Show version
   2mux help                    Show this help

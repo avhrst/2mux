@@ -10,7 +10,7 @@ Recipient and sender roles are case-sensitive: `worker` or `reviewer`. Start fla
 
 `start` and `stop` serialize session changes for the same canonical project directory, waiting up to ten seconds for the lifecycle lock. The lock namespace is independent of caller `TMPDIR`. Interactive attachment releases that lock, so another terminal can still reattach or stop the session.
 
-Successful commands exit with status `0`; an error prints `Error: ...` to stderr and exits `1`. With no session, `status`, `messages` and `stop` print that 2mux is not running and return success. `send` without a queue address, `prompt` and `resolve` instead return an error.
+Successful commands exit with status `0`; an error prints `Error: ...` to stderr and exits `1`. With no session, `status`, `messages` and `stop` print that 2mux is not running and return success. `send` without a queue address, `prompt`, `respawn` and `resolve` instead return an error.
 
 ## Start and attach
 
@@ -25,7 +25,7 @@ Successful commands exit with status `0`; an error prints `Error: ...` to stderr
 | `--agents` | In a new session, launch Codex as worker and pi as reviewer with generated role instructions. Requires both CLIs in `PATH`. In an existing session, check agent presence without replacing processes. |
 | `--detach` | Create/reuse the session and ensure the bridge is running, then print its name without attaching. Can be combined with `--agents`. |
 
-An interactive launch attaches through tmux; when already in a tmux client, it switches that client. Unknown start options are errors. Existing sessions must have the matching directory marker, a valid private runtime directory and both live registered panes. A missing or dead pane is not replaced automatically.
+An interactive launch attaches through tmux; when already in a tmux client, it switches that client. Unknown start options are errors. Existing sessions must have the matching directory marker and a valid private runtime directory. A missing or dead role pane prints a warning but does not prevent attaching; it is never replaced automatically. Use `2mux respawn ROLE` to relaunch it.
 
 ## Send a message
 
@@ -37,7 +37,7 @@ An interactive launch attaches through tmux; when already in a tmux client, it s
 | --- | --- |
 | Recipient | Required: `worker` or `reviewer`. |
 | Message | Exactly one shell argument, or `-` to read stdin. Quote text containing spaces. |
-| `--queue DIR` | Address an existing private queue directly through filesystem I/O. Both `DIR` and `DIR/messages` must be absolute directories owned by the current Unix user with mode `0700`. This path does not discover the tmux session, check the recipient pane or start/recover the bridge. |
+| `--queue DIR` | Address an existing private queue directly through filesystem I/O. Both `DIR` and `DIR/messages` must be absolute directories owned by the current Unix user with mode `0700`. This path does not discover the tmux session, check the recipient pane or start/recover the bridge. If no healthy bridge holds the queue, the message is still queued and a warning is printed to stderr. |
 | `--from ROLE` | Set the sender to `worker` or `reviewer`. This is a message label, not authentication. |
 
 Without `--queue`, 2mux finds the current directory's session, checks that the recipient pane exists and ensures the bridge is running. The sender is inferred from `TMUX_PANE` when it matches a registered role, otherwise it is `user`. With `--queue`, the sender defaults to `user`. `--from` overrides either default; the literal value `user` is not accepted by that option.
@@ -48,7 +48,8 @@ Message rules:
 
 - Nonempty after trimming whitespace, valid UTF-8 and at most 65,536 bytes, including newline bytes.
 - Multiline text and tabs are accepted. Other Unicode control characters, including carriage return and Escape, are rejected; use LF line endings.
-- Text is delivered with a header containing the message ID, sender and recipient.
+- Bidirectional control characters are rejected, and so is any line whose first non-blank text is `[2mux`, which could imitate a header.
+- Text is delivered between a header containing the message ID, sender and recipient and an end marker `[2mux end of message ID]`.
 
 Operator example, run from the project directory:
 
@@ -92,7 +93,9 @@ Requires a running project session and valid runtime metadata. Prints the role i
 | `delivered` | Paste and Enter succeeded, or an operator marked the receipt delivered. | Check the agent's response and task results separately. |
 | `uncertain` | A paste/submission may have happened, or the bridge stopped during an attempt. | Inspect the receiving agent, then resolve explicitly. Later messages to this recipient wait. |
 
-Bridge states are `running (PID ...)`, `stopped`, `unresponsive` or `error: ...`. A running bridge may also report the most recent queue/delivery error. Foreground-agent detection does not establish whether a CLI dialog can safely accept a task.
+Bridge states are `running (PID ...)`, `stopped`, `unresponsive` or `error: ...`. A running bridge may also report the most recent queue/delivery error, including `waiting for pane ... to become idle` and `pane ... shows a confirmation dialog`. The bridge only pastes into a pane whose screen has been unchanged for one second and holds messages while known confirmation phrases are visible near the bottom of the screen. This detection is heuristic; finish native CLI dialogs yourself.
+
+If a record file is corrupt, `status` and `messages` still list the valid records and name each corrupt file. Delivery pauses for every recipient until the file is fixed or removed from the `messages` directory.
 
 ## Resolve an interrupted delivery
 
@@ -106,6 +109,14 @@ Use the full message ID from `messages`, after inspecting the receiving agent:
 - `retry` changes the same record to `queued` and clears its error. The running bridge can then deliver it again.
 
 Only `uncertain` or interrupted `sending` records can be resolved. Unknown IDs and other states are errors. Resolution serializes with bridge delivery; a busy queue can ask you to try again. `resolve` does not start a stopped bridge. Use `2mux start --detach` if needed. Do not retry while the outcome remains unknown.
+
+## Respawn an exited agent
+
+```text
+2mux respawn <worker|reviewer>
+```
+
+Relaunches the role's agent CLI (Codex for the worker, pi for the reviewer) with fresh role instructions. If the registered pane is dead, for example after the agent exited, the agent restarts in that pane. If the pane was removed, a new pane is split next to the other role and registered explicitly. A live pane is never replaced: exit its process first. Messages queued for the role are delivered once the agent is running.
 
 ## Stop
 

@@ -92,7 +92,7 @@ exec pi --append-system-prompt "$(2mux prompt reviewer)"
 
 Run these from the project directory with `2mux` in `PATH`. `exec` replaces the shell, preventing a later delivery from entering that shell after the agent exits. Regenerate role prompts after recreating a session because the queue address changes.
 
-On an existing session, `start --agents` checks agent presence and does not replace the current processes. If the panes still contain shells, launch manually as above. If a registered pane is dead or missing, save work in surviving panes and recreate the session.
+On an existing session, `start --agents` checks agent presence and does not replace the current processes. If the panes still contain shells, launch manually as above. If an agent exited and left a dead pane, or its pane was removed, run `2mux respawn worker` or `2mux respawn reviewer`; queued messages for that role are delivered once it runs.
 
 ## Diagnose delivery
 
@@ -111,13 +111,17 @@ Start with:
 | `codex` or `pi` is required | Make both configured CLIs available in `PATH` before `start --agents`. |
 | Pane is waiting for an interactive agent | Complete manual launch or inspect the foreground program. Messages wait while a shell or an unrecognized process is present. |
 | Pane is in copy mode or has input disabled | Exit copy mode or restore pane input, then check the queue again. |
-| Bridge is stopped | Run `2mux start --detach` from the same directory to restart it without attaching. |
+| Bridge is stopped, or an agent's send prints `Warning: 2mux bridge is ...` | Run `2mux start --detach` from the same directory to restart it without attaching. Queued messages are then delivered. |
 | Bridge is locked but unresponsive | Inspect `status`, `health.json` and `bridge.log` in the reported runtime directory. A held lock is not bypassed by starting another bridge. |
-| A registered pane is missing/dead, or the session has no bridge runtime | Save work, inspect delivery records if available, then use `2mux stop` and create a new session. |
+| A registered pane is missing/dead | Save any work, then run `2mux respawn ROLE` to relaunch that agent. `2mux` still reattaches meanwhile. |
+| Pane shows a confirmation dialog | Answer the agent's dialog yourself; held messages follow once it closes. |
+| Waiting for a pane to become idle | Normal while an agent is producing output; delivery follows after one quiet second. |
+| `status` lists corrupt records | Inspect the named file in the `messages` directory, then fix or remove it; delivery is paused until then. |
+| The session has no bridge runtime | Save work, then use `2mux stop` and create a new session. |
 | A same-name session is not owned by 2mux | Inspect that tmux session separately; 2mux refuses to attach to or stop it. |
 | A message is `uncertain` | Inspect the receiving agent before resolving the receipt, as described below. |
 
-The bridge checks for a recognizable foreground agent, not whether every CLI dialog is ready for a prompt. Finish native confirmations yourself and avoid typing in the receiving pane while a message is being submitted.
+The bridge checks for a recognizable foreground agent, a quiet screen and known confirmation phrases, not whether every CLI dialog is ready for a prompt. Finish native confirmations yourself and avoid typing in the receiving pane while a message is being submitted.
 
 ## Resolve an uncertain message
 

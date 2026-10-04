@@ -65,6 +65,11 @@ func main() {
 			}
 			text := string(prompt)
 			prompt = nil
+			if strings.Contains(text, "DIALOG:") {
+				// Imitate a native approval prompt that Enter would answer.
+				// Draw it before logging, so the test only proceeds once it is visible.
+				fmt.Print("\r\nRun this command? Press enter to confirm\r\n")
+			}
 			f, err := os.OpenFile(filepath.Join(dir, role+".jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 			if err != nil {
 				panic(err)

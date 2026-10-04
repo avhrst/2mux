@@ -54,13 +54,17 @@ func tmuxInput(input io.Reader, args ...string) (string, error) {
 	return strings.TrimSpace(string(output)), nil
 }
 
+// sessionTarget addresses a session unambiguously for tmux commands whose
+// target type is a window; '=' disables name-prefix matching.
+func sessionTarget(name string) string { return "=" + name + ":" }
+
 func sessionExists(name string) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "tmux", "has-session", "-t", "="+name)
 	output, err := cmd.CombinedOutput()
 	if err == nil {
-		actual, err := tmux("display-message", "-p", "-t", "="+name+":", "#{session_name}")
+		actual, err := tmux("display-message", "-p", "-t", sessionTarget(name), "#{session_name}")
 		if err != nil {
 			return false, err
 		}
@@ -130,7 +134,7 @@ func createTwoPaneSession(name, cwd string) (err error) {
 		}
 	}()
 
-	if _, err = tmux("set-option", "-t", "="+name+":", "@twomux_cwd", cwd); err != nil {
+	if _, err = tmux("set-option", "-t", sessionTarget(name), "@twomux_cwd", cwd); err != nil {
 		return err
 	}
 	var reviewer string
@@ -139,7 +143,7 @@ func createTwoPaneSession(name, cwd string) (err error) {
 		return err
 	}
 	for option, value := range map[string]string{"@twomux_worker": worker, "@twomux_reviewer": reviewer, "@twomux_runtime": dir} {
-		if _, err = tmux("set-option", "-t", "="+name+":", option, value); err != nil {
+		if _, err = tmux("set-option", "-t", sessionTarget(name), option, value); err != nil {
 			return err
 		}
 	}
@@ -150,9 +154,6 @@ func createTwoPaneSession(name, cwd string) (err error) {
 		return err
 	}
 	if _, err = tmux("set-option", "-w", "-t", worker, "pane-border-format", " #{?#{==:#{pane_id},#{@twomux_worker}},WORKER,#{?#{==:#{pane_id},#{@twomux_reviewer}},REVIEWER,#{pane_title}}} "); err != nil {
-		return err
-	}
-	if _, err = tmux("set-option", "-t", "="+name+":", "mouse", "on"); err != nil {
 		return err
 	}
 	if _, err = tmux("select-pane", "-t", worker, "-T", "WORKER"); err != nil {
@@ -168,7 +169,7 @@ func createTwoPaneSession(name, cwd string) (err error) {
 }
 
 func verifySessionDirectory(name, cwd string) error {
-	actual, err := tmux("show-option", "-v", "-t", "="+name+":", "@twomux_cwd")
+	actual, err := tmux("show-option", "-v", "-t", sessionTarget(name), "@twomux_cwd")
 	if err != nil || actual != cwd {
 		return fmt.Errorf("session %q already exists but is not owned by 2mux in this directory", name)
 	}
@@ -196,7 +197,7 @@ func killSession(name string) error {
 }
 
 func listSessionPanes(name string) ([]paneInfo, error) {
-	output, err := tmux("list-panes", "-s", "-t", "="+name+":", "-F", "#{pane_id}\t#{pane_left}\t#{pane_dead}")
+	output, err := tmux("list-panes", "-s", "-t", sessionTarget(name), "-F", "#{pane_id}\t#{pane_left}\t#{pane_dead}")
 	if err != nil {
 		return nil, err
 	}
@@ -216,28 +217,41 @@ func listSessionPanes(name string) ([]paneInfo, error) {
 	return panes, nil
 }
 
-func rolePane(name, role string) (string, error) {
+// registeredPane returns a role's stored pane ID and whether that pane still
+// exists in the session and whether its process is alive.
+func registeredPane(name, role string) (id string, exists, alive bool, err error) {
 	if !validRole(role) {
-		return "", fmt.Errorf("unknown role %q", role)
+		return "", false, false, fmt.Errorf("unknown role %q", role)
 	}
-	id, err := tmux("show-option", "-v", "-t", "="+name+":", "@twomux_"+role)
+	id, err = tmux("show-option", "-v", "-t", sessionTarget(name), "@twomux_"+role)
 	if err != nil {
-		return "", fmt.Errorf("%s pane is not registered; save work and recreate this session with '2mux stop' and '2mux start'", role)
+		return "", false, false, fmt.Errorf("%s pane is not registered; save work and recreate this session with '2mux stop' and '2mux start'", role)
 	}
 	panes, err := listSessionPanes(name)
 	if err != nil {
-		return "", err
+		return "", false, false, err
 	}
 	for _, pane := range panes {
-		if pane.ID == id && !pane.Dead {
-			return id, nil
+		if pane.ID == id {
+			return id, true, !pane.Dead, nil
 		}
 	}
-	return "", fmt.Errorf("%s pane %s is missing or dead", role, id)
+	return id, false, false, nil
+}
+
+func rolePane(name, role string) (string, error) {
+	id, _, alive, err := registeredPane(name, role)
+	if err != nil {
+		return "", err
+	}
+	if !alive {
+		return "", fmt.Errorf("%s pane %s is missing or dead; run '2mux respawn %s'", role, id, role)
+	}
+	return id, nil
 }
 
 func runtimeDirectory(name string) (string, error) {
-	dir, err := tmux("show-option", "-v", "-t", "="+name+":", "@twomux_runtime")
+	dir, err := tmux("show-option", "-v", "-t", sessionTarget(name), "@twomux_runtime")
 	if err != nil {
 		return "", errors.New("session has no bridge runtime; save work and recreate it with '2mux stop' and '2mux start'")
 	}

@@ -59,3 +59,26 @@ The follow-up review reproduced four additional problems before applying fixes:
 Validation after the fixes: fresh build, `go vet ./...` and `TWOMUX_INTEGRATION=1 TWOMUX_NATIVE_SMOKE=1 go test -race -count=1 -v ./...` passed. New regressions failed against the original implementation, then passed with the fixes. Integration exercised six concurrent shell starts across two different caller `TMPDIR`s, stop waiting for paused initialization, six concurrent agent starts and the existing eight-delivery review cycle. Lifecycle locking uses the fixed `/tmp/2mux-control-UID` namespace. Native smoke recognized the installed agents without a model prompt. Tests use unique projects and remove only their own control lock files after commands finish; tmux sockets and message records are isolated in test temporary directories. CLI and architecture documentation are synchronized in English and Ukrainian.
 
 These changes do not establish model-level delivery guarantees or validate account/model configuration. The earlier saved live receipts remain historical evidence; this follow-up did not run a new model task.
+
+## Second follow-up review — 2026-10-04
+
+A full static review found these issues. Each fix has a unit or integration regression:
+
+| Priority | Problem | Implemented improvement |
+| --- | --- | --- |
+| P1 | A process check alone allowed a paste and Enter while Codex showed a command approval dialog, so a peer message could answer it. | The bridge captures the screen and holds delivery while known confirmation phrases are visible at the bottom, and until the screen has been unchanged for one second. |
+| P1 | A body line could imitate a `[2mux message ... from user ...]` header. | Lines starting with `[2mux` and bidirectional control characters are rejected; delivered text ends with a marker containing the random message ID. |
+| P1 | A transient tmux error stopped the bridge, and agents' `send --queue` kept reporting success while nothing was delivered. | The bridge exits only when tmux confirms the session is gone or changed, tolerating other errors for 30 seconds. `send --queue` warns when no healthy bridge holds the queue. |
+| P2 | After an agent exited, its dead pane prevented reattaching, and recovery required recreating the whole session. | `start` warns and attaches. New `2mux respawn ROLE` relaunches the agent in a dead pane, or registers a new pane explicitly when the old one was removed; live panes are never replaced. |
+| P2 | One corrupt record also made `status` and `messages` fail. | Diagnostics list valid records and name corrupt files; delivery remains paused until they are fixed. |
+| P2 | Health was written only after a batch, so a slow batch looked unresponsive and blocked `send`/`stop`. | Health is written before each delivery attempt, and the staleness limit is 15 seconds. |
+| P3 | An unready recipient caused two fsynced record writes every 300 ms; records accumulated forever; `stop` printed an empty path; the session forced `mouse on`. | Readiness is checked before `sending`, and unchanged errors are not rewritten. Delivered records older than a day are archived. `stop` omits a missing path, and the user's tmux mouse setting is left alone. |
+| P3 | No CI; the integration suite was one function; several helpers had no tests; translations relied on manual sync. | GitHub Actions runs gofmt, vet, unit and integration tests on Linux and macOS with Go 1.22 and stable. The integration test runs as ordered subtests. New unit tests cover these changes, private directories and locks. `docs_test.go` compares the structure of the two document languages. |
+
+Validation: `gofmt -l .` was clean. `go vet ./...` and `TWOMUX_INTEGRATION=1 go test -race -count=1 ./...` passed with Go 1.27.1 and Go 1.22.12 on macOS arm64 with tmux 3.6a. The Linux amd64 build and vet passed. The native smoke test and a live model run were not repeated.
+
+Remaining limits: tmux does not report whether an application enabled bracketed paste, and dialog detection matches known phrases, so an unfamiliar dialog can still receive a message. Native agent processes are recognized by executable name only.
+
+## Refactoring — 2026-10-04
+
+A quality pass with unchanged behavior, verified by the full test suite before and after. Message states and roles are now named constants (`messageStatus`, `roleWorker`, `roleReviewer`, `senderUser`) instead of repeated string literals. Three duplicated flock retry loops became one `waitLock` helper. Pane readiness — agent detection, quiet-screen and dialog checks, paste and submit — moved from `bridge.go` into `pane.go`. The command bodies of `run` moved into focused functions (`sendToQueue`, `startSession`, `sendViaSession`, `printReceipts`, `printStatus`), and repeated expressions became the `sessionTarget`, `peerRole` and `agentProgram` helpers. `staticcheck` and `govulncheck` report no findings; CI now also runs staticcheck.
