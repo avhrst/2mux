@@ -190,11 +190,12 @@ func TestCorruptMessageMetadataIsNotDelivered(t *testing.T) {
 func TestForegroundAgentDetection(t *testing.T) {
 	for _, input := range []string{
 		"S+ /usr/bin/zsh zsh\nS+ /usr/bin/codex codex prompt",
-		"S+ /opt/node node /opt/lib/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js",
-		"S+ /opt/bin/pi pi",
-		"Ss+ node pi",
-		"S+ bun bun /opt/pi-coding-agent/cli.js",
-		"S+ bun bun run /opt/pi-coding-agent/cli.js",
+		"S+ /opt/bin/claude claude",
+		"Ss+ 2.1.289 claude --append-system-prompt review",
+		"S+ 2.1.289 /home/u/.local/bin/claude",
+		"S+ /opt/node node /opt/lib/node_modules/@anthropic-ai/claude-code/cli.js",
+		"S+ bun bun /opt/lib/node_modules/@anthropic-ai/claude-code/cli.js",
+		"S+ bun bun run /opt/lib/node_modules/@anthropic-ai/claude-code/cli.js",
 	} {
 		if !hasForegroundAgent(input) {
 			t.Errorf("did not recognize %q", input)
@@ -202,11 +203,12 @@ func TestForegroundAgentDetection(t *testing.T) {
 	}
 	for _, input := range []string{
 		"S+ /bin/zsh zsh", "S+ node node app.js", "S /bin/codex codex",
-		"S+ cat cat codex", "S+ python python pi.py",
-		"S+ node node app.js /opt/pi-coding-agent/cli.js",
-		"S+ node node --require /opt/pi-coding-agent/cli.js",
-		"S+ node node --require=/opt/pi-coding-agent/cli.js app.js",
-		"S+ bun bun run app.js /opt/pi-coding-agent/cli.js",
+		"S+ cat cat claude", "S+ python python claude.py",
+		"S+ 2.1.289 node app.js", "S+ v2.1.289 claude", "S 2.1.289 claude",
+		"S+ node node app.js /opt/@anthropic-ai/claude-code/cli.js",
+		"S+ node node --require /opt/@anthropic-ai/claude-code/cli.js",
+		"S+ node node --require=/opt/@anthropic-ai/claude-code/cli.js app.js",
+		"S+ bun bun run app.js /opt/@anthropic-ai/claude-code/cli.js",
 	} {
 		if hasForegroundAgent(input) {
 			t.Errorf("accepted non-agent %q", input)
@@ -231,21 +233,21 @@ func TestBridgeLockIsExclusive(t *testing.T) {
 	}
 }
 
-func TestForegroundPiSymlink(t *testing.T) {
+func TestForegroundClaudeSymlink(t *testing.T) {
 	dir := t.TempDir()
-	target := filepath.Join(dir, "pi-coding-agent", "cli.js")
-	if err := os.Mkdir(filepath.Dir(target), 0700); err != nil {
+	target := filepath.Join(dir, "@anthropic-ai", "claude-code", "cli.js")
+	if err := os.MkdirAll(filepath.Dir(target), 0700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(target, nil, 0600); err != nil {
 		t.Fatal(err)
 	}
-	link := filepath.Join(dir, "pi")
+	link := filepath.Join(dir, "claude")
 	if err := os.Symlink(target, link); err != nil {
 		t.Fatal(err)
 	}
 	if !hasForegroundAgent("S+ node node " + link) {
-		t.Fatal("installed pi symlink not recognized")
+		t.Fatal("installed claude symlink not recognized")
 	}
 }
 

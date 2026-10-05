@@ -22,7 +22,7 @@ Successful commands exit with status `0`; an error prints `Error: ...` to stderr
 | Option | Behavior |
 | --- | --- |
 | No options | Create two shells or reattach to an existing session; ensure the bridge is running. |
-| `--agents` | In a new session, launch Codex as worker and pi as reviewer with generated role instructions. Requires both CLIs in `PATH`. In an existing session, check agent presence without replacing processes. |
+| `--agents` | In a new session, launch Codex as worker and Claude Code as reviewer with generated role instructions; the reviewer runs with `--disallowedTools "Edit Write NotebookEdit"`. Requires the `codex` and `claude` CLIs in `PATH`. In an existing session, check agent presence without replacing processes. |
 | `--detach` | Create/reuse the session and ensure the bridge is running, then print its name without attaching. Can be combined with `--agents`. |
 
 An interactive launch attaches through tmux; when already in a tmux client, it switches that client. Unknown start options are errors. Existing sessions must have the matching directory marker and a valid private runtime directory. A missing or dead role pane prints a warning but does not prevent attaching; it is never replaced automatically. Use `2mux respawn ROLE` to relaunch it.
@@ -75,7 +75,7 @@ MESSAGE
 2mux prompt <worker|reviewer>
 ```
 
-Requires a running project session and valid runtime metadata. Prints the role instructions plus the invoking binary's absolute path and this session's queue address. It does not launch an agent or send a message. The worker waits for a concrete task; the reviewer waits for a worker message. Generate a new prompt after recreating a session.
+Requires a running project session and valid runtime metadata. Prints the role instructions plus the invoking binary's absolute path and this session's queue address. It does not launch an agent or send a message. The worker waits for a concrete task and requests review with `READY_FOR_REVIEW`; the reviewer waits for a worker message and replies once with `APPROVED` or numbered `CORRECTIONS`. Generate a new prompt after recreating a session.
 
 ## Inspect status and receipts
 
@@ -116,7 +116,7 @@ Only `uncertain` or interrupted `sending` records can be resolved. Unknown IDs a
 2mux respawn <worker|reviewer>
 ```
 
-Relaunches the role's agent CLI (Codex for the worker, pi for the reviewer) with fresh role instructions. If the registered pane is dead, for example after the agent exited, the agent restarts in that pane. If the pane was removed, a new pane is split next to the other role and registered explicitly. A live pane is never replaced: exit its process first. Messages queued for the role are delivered once the agent is running.
+Relaunches the role's agent CLI (Codex for the worker, Claude Code for the reviewer) with fresh role instructions. If the registered pane is dead, for example after the agent exited, the agent restarts in that pane. If the pane was removed, a new pane is split next to the other role and registered explicitly. A live pane is never replaced: exit its process first. Messages queued for the role are delivered once the agent is running.
 
 ## Stop
 

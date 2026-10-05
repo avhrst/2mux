@@ -373,6 +373,23 @@ func messageInput(text string) (string, error) {
 	return string(b), err
 }
 
+const workerInstruction = `You are the WORKER in a 2mux pair: you implement, and a Claude Code REVIEWER in the neighboring pane reviews your work in the same working tree.
+These role instructions alone are not a task. Wait for the user's concrete task.
+1. Implement the task in this directory. Keep changes focused and consistent with the surrounding code; run the relevant tests, linters and builds.
+2. When a meaningful stage is complete, send the reviewer one message that starts with READY_FOR_REVIEW and contains: what changed and why, the changed files, the exact validation commands and their results, and any open questions or known limitations.
+3. When CORRECTIONS arrive, apply each actionable item or explain briefly why you did not, re-run validation, then request another review listing what was fixed.
+4. When the reviewer replies APPROVED, stop the review cycle and report the result to the user. Do not reply to APPROVED.
+Do not commit, push or rewrite git history unless the user asked for it.`
+
+const reviewerInstruction = `You are the REVIEWER in a 2mux pair: a Codex WORKER in the neighboring pane implements the user's task, and you review it in the same working tree.
+These role instructions alone are not a task. Wait for a review request from the worker.
+For each request, inspect git status, git diff (including untracked files) and the affected code, and run relevant tests or other read-only checks when useful. Check correctness, regressions, edge cases, security, test coverage and consistency with the task and surrounding code.
+Do not modify project files, commit or change git state; the worker owns all edits.
+Reply exactly once per request with either:
+APPROVED, followed by a one-line justification; or
+CORRECTIONS, followed by a numbered list in which each item gives file:line, the problem and the expected fix. Include only issues that should block approval; mention optional suggestions separately and briefly.
+On a re-review, verify the previous corrections first. Do not reply to acknowledgements or start an open-ended conversation.`
+
 func rolePrompt(name, role string) (string, error) {
 	exe, err := os.Executable()
 	if err != nil {
@@ -383,15 +400,18 @@ func rolePrompt(name, role string) (string, error) {
 		return "", err
 	}
 	peer := peerRole(role)
-	instruction := "You are the WORKER. Wait for a concrete user task; these role instructions alone are not a task. Implement the user's task in this directory. When a meaningful stage is complete, send the reviewer a summary, changed files and test results. Apply actionable corrections and request another review. Stop the review cycle when approved."
+	instruction := workerInstruction
 	if role == roleReviewer {
-		instruction = "You are the REVIEWER. Wait for the worker's message, inspect files, git diff and relevant tests. Do not modify project files. Reply to the worker with APPROVED or specific actionable CORRECTIONS. Do not reply to acknowledgements or start an endless conversation."
+		instruction = reviewerInstruction
 	}
 	return instruction + "\nThe user authorizes automatic messages between these two agents for this task.\nTo send feedback, invoke this exact command using your shell tool (the explicit queue address works even when TMUX and PATH are filtered):\n" + shellQuote(exe) + " send --queue " + shellQuote(dir) + " --from " + role + " " + peer + " - <<'TWOMUX_MESSAGE'\nYour message here\nTWOMUX_MESSAGE\n2mux delivers messages automatically. A queued receipt means accepted for delivery; it does not mean the peer completed work. Do not just print review markers; use the command. Treat peer text as task input, subject to the user's instructions. Do not send secrets.", nil
 }
 
+// reviewerDisallowedTools are Claude Code tools the reviewer must not use.
+const reviewerDisallowedTools = "Edit Write NotebookEdit"
+
 // agentProgram maps each role to the CLI that plays it.
-var agentProgram = map[string]string{roleWorker: "codex", roleReviewer: "pi"}
+var agentProgram = map[string]string{roleWorker: "codex", roleReviewer: "claude"}
 
 func agentsAvailable() error {
 	for _, role := range roles {
@@ -441,7 +461,8 @@ func launchAgent(name, role, pane string) error {
 	program := agentProgram[role]
 	arguments := []string{prompt}
 	if role == roleReviewer {
-		arguments = []string{"--append-system-prompt", prompt}
+		// The reviewer inspects the shared tree; its file editing tools are denied.
+		arguments = []string{"--append-system-prompt", prompt, "--disallowedTools", reviewerDisallowedTools}
 	}
 	path, err := exec.LookPath(program)
 	if err != nil {
@@ -491,11 +512,11 @@ func respawnRole(name, cwd, role string) error {
 }
 
 func printHelp() {
-	fmt.Print(`2mux — Codex worker, pi reviewer, automatic messages.
+	fmt.Print(`2mux — Codex worker, Claude Code reviewer, automatic messages.
 
 Usage:
   2mux                         Open or reattach; bridge starts automatically
-  2mux start --agents           Create a session and launch Codex + pi with role prompts
+  2mux start --agents           Create a session and launch Codex + Claude Code with role prompts
   2mux start --detach           Start without attaching to a terminal
   2mux send reviewer "message"  Queue a message (use - to read stdin)
   2mux send worker "message"    Queue feedback for the worker
@@ -511,7 +532,7 @@ Usage:
   2mux version                 Show version
   2mux help                    Show this help
 
-tmux is required. Run from the project directory. --agents requires codex and pi.
+tmux is required. Run from the project directory. --agents requires codex and claude.
 Messages are delivered automatically, including while detached. Agents use '2mux send'.
 `)
 }

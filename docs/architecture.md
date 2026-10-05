@@ -9,13 +9,13 @@
 ```mermaid
 flowchart LR
     W[Codex WORKER] -->|2mux send| Q[Private JSON queue]
-    R[pi REVIEWER] -->|2mux send| Q
+    R[Claude Code REVIEWER] -->|2mux send| Q
     Q --> B[Background bridge]
     B -->|tmux paste and Enter| W
     B -->|tmux paste and Enter| R
 ```
 
-Both panes share one project working tree and Unix account. The generated reviewer instructions request inspection without editing; they do not enforce read-only access. Message sender labels likewise do not authenticate the caller.
+Both panes share one project working tree and Unix account. The generated reviewer instructions request inspection without editing, and the reviewer launch denies Claude Code's `Edit`, `Write` and `NotebookEdit` tools; shell commands remain subject to Claude Code's permissions, so this does not enforce read-only access. Message sender labels likewise do not authenticate the caller.
 
 | Source | Responsibility |
 | --- | --- |
@@ -79,11 +79,11 @@ stateDiagram-v2
 
 Each batch attempts at most eight messages. An unavailable or uncertain recipient blocks later messages to that recipient while the other direction can continue. Completed records are skipped. On recovery, an interrupted `sending` record becomes `uncertain` because submission may already have happened. This prevents an automatic retry of an ambiguous outcome; it does not guarantee model-level exactly-once processing.
 
-Before delivering, the bridge checks that the pane is alive, outside copy mode and accepting input. `ps` inspects only foreground processes on that terminal. Recognized forms include native Codex/pi processes and supported Node/Bun pi launch forms; a generic Node process or shell is insufficient. A native process is recognized by its executable name only, so any foreground program named `codex` or `pi` is accepted. The bridge then captures the visible screen. It waits while the screen changed within the last second, remembering a hash per pane across ticks, and while known confirmation phrases appear in the bottom 15 non-blank lines. Both checks happen before a record is marked `sending`, so a pane that cannot receive does not cause record writes on every tick.
+Before delivering, the bridge checks that the pane is alive, outside copy mode and accepting input. `ps` inspects only foreground processes on that terminal. Recognized forms include native Codex/Claude Code processes and supported Node/Bun Claude Code launch forms; a generic Node process or shell is insufficient. A native process is recognized by its executable name only, so any foreground program named `codex` or `claude` is accepted. The native Claude Code installer binary is also accepted: its process name is a version such as `2.1.289` and its argv0 is `claude`. The bridge then captures the visible screen. It waits while the screen changed within the last second, remembering a hash per pane across ticks, and while known confirmation phrases, including Codex approvals and Claude Code permission dialogs such as `Do you want to proceed?`, `Do you want to make this edit`, `Do you want to create` or `Esc to cancel`, appear in the bottom 15 non-blank lines. Both checks happen before a record is marked `sending`, so a pane that cannot receive does not cause record writes on every tick.
 
-For Node/Bun, detection accepts the `pi` process title or a direct pi script entry point, including an absolute `pi` symlink and `bun run SCRIPT`. A pi path among another program's arguments or runtime options does not authorize delivery. Arbitrary runtime flag combinations are not recognized as script entry points.
+For Node/Bun, detection accepts a direct script entry point under `/@anthropic-ai/claude-code/` ending in `.js`, including a resolved `claude` symlink and `bun run SCRIPT`. A Claude Code path among another program's arguments or runtime options does not authorize delivery. Arbitrary runtime flag combinations are not recognized as script entry points.
 
-Delivery loads a uniquely named tmux buffer, rechecks the pane, uses bracketed paste with LF preservation, waits 150 ms, rechecks readiness and sends Enter. Failure before paste leaves the record queued. Paste errors and later failures become uncertain. tmux does not report whether an application enabled bracketed paste; Codex and pi enable it at their prompts. These checks reduce misdelivery but cannot infer the meaning or readiness of every native CLI dialog.
+Delivery loads a uniquely named tmux buffer, rechecks the pane, uses bracketed paste with LF preservation, waits 150 ms, rechecks readiness and sends Enter. Failure before paste leaves the record queued. Paste errors and later failures become uncertain. tmux does not report whether an application enabled bracketed paste; Codex and Claude Code enable it at their prompts. These checks reduce misdelivery but cannot infer the meaning or readiness of every native CLI dialog.
 
 The bridge loop uses a 300 ms ticker and writes health after each batch and before each delivery attempt. Health older than 15 seconds is considered unresponsive. Most tmux calls have a five-second timeout; foreground inspection has three seconds. A failed health write is logged but does not stop the bridge. About once a minute the bridge archives old delivered records. These are implementation bounds, not an end-to-end delivery deadline.
 
@@ -108,10 +108,10 @@ TWOMUX_NATIVE_SMOKE=1 go test -v -run TestInstalledAgentPresence
 | --- | --- |
 | [main_test.go](../main_test.go), [bridge_test.go](../bridge_test.go) | Session names, invalid arguments, explicit sending without tmux environment, queue ordering, batch bounds, concurrency, ambiguous delivery, validation including forged headers, corrupt-record reporting, archiving, quiet-screen and dialog checks, private directories, locks and foreground-process detection. |
 | [docs_test.go](../docs_test.go) | English and Ukrainian documents have matching headings, table rows, list items and code fences. |
-| [integration_test.go](../integration_test.go) | An isolated tmux socket and TUI fixtures exercise concurrent first starts across different `TMPDIR`s, stop waiting during initialization, concurrent agent starts, worker → review → correction → rereview → approval, UTF-8, detach, pane changes, recovery and delivery guards. Test project lock files are removed after all commands finish. No model/network calls. |
-| [native_test.go](../native_test.go) | Installed Codex/pi process identification on a separate tmux socket without submitting a model prompt. Requires installed CLIs; account/model configuration and model execution are not validated. |
+| [integration_test.go](../integration_test.go) | An isolated tmux socket and TUI fixtures (binaries named `codex` and `claude`) exercise concurrent first starts across different `TMPDIR`s, stop waiting during initialization, concurrent agent starts, worker → review → correction → rereview → approval, UTF-8, detach, pane changes, recovery and delivery guards. Test project lock files are removed after all commands finish. No model/network calls. |
+| [native_test.go](../native_test.go) | Installed Codex and Claude Code process identification on a separate tmux socket without submitting a model prompt. Requires installed CLIs; account/model configuration and model execution are not validated. |
 
-Fixture tests establish transport behavior. Native smoke establishes process recognition. Neither verifies real model responses, the agent's prompt queue behavior or business correctness. The recorded [live review](../REVIEW.md) and [receipts](../validation/live-review-20260930.json) establish one historical real-agent scenario and list its limits; they are not results of a new run. [CI](../.github/workflows/ci.yml) runs formatting, vet, unit and integration tests on Linux and macOS with Go 1.22 and the current stable release.
+Fixture tests establish transport behavior. Native smoke establishes process recognition. Neither verifies real model responses, the agent's prompt queue behavior or business correctness. The recorded [live review](../REVIEW.md) and [receipts](../validation/live-review-20260930.json) establish one historical real-agent scenario from an earlier Codex + pi pair and list its limits; they are not results of a new run. [CI](../.github/workflows/ci.yml) runs formatting, vet, unit and integration tests on Linux and macOS with Go 1.22 and the current stable release.
 
 For a Linux compile check from another host:
 

@@ -13,10 +13,10 @@ import (
 // This checks process identification, not model execution or TUI prompt handling.
 func TestInstalledAgentPresence(t *testing.T) {
 	if os.Getenv("TWOMUX_NATIVE_SMOKE") != "1" {
-		t.Skip("set TWOMUX_NATIVE_SMOKE=1 to check installed Codex and pi")
+		t.Skip("set TWOMUX_NATIVE_SMOKE=1 to check installed Codex and Claude Code")
 	}
 	paths := map[string]string{}
-	for _, program := range []string{"go", "tmux", "codex", "pi"} {
+	for _, program := range []string{"go", "tmux", "codex", "claude"} {
 		path, err := exec.LookPath(program)
 		if err != nil {
 			t.Fatal(err)
@@ -48,8 +48,6 @@ func TestInstalledAgentPresence(t *testing.T) {
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("TMUX", "")
 	t.Setenv("TMUX_PANE", "")
-	t.Setenv("PI_CODING_AGENT_DIR", filepath.Join(dir, "pi-config"))
-	t.Setenv("PI_OFFLINE", "1")
 	project := filepath.Join(dir, "project")
 	if err := os.Mkdir(project, 0700); err != nil {
 		t.Fatal(err)
@@ -91,7 +89,7 @@ func TestInstalledAgentPresence(t *testing.T) {
 	if _, err := tmux("respawn-pane", "-k", "-t", worker, paths["codex"], "--no-alt-screen"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tmux("respawn-pane", "-k", "-t", reviewer, paths["pi"], "--offline", "--no-session", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-themes"); err != nil {
+	if _, err := tmux("respawn-pane", "-k", "-t", reviewer, paths["claude"], "--disallowedTools", reviewerDisallowedTools); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(10 * time.Second)
@@ -101,7 +99,7 @@ func TestInstalledAgentPresence(t *testing.T) {
 			if err != nil || strings.Count(status, "(agent present)") != 2 {
 				t.Fatalf("status: %s: %v", status, err)
 			}
-			t.Log("installed Codex and pi detected; no task or model prompt submitted")
+			t.Log("installed Codex and Claude Code detected; no task or model prompt submitted")
 			return
 		}
 		time.Sleep(100 * time.Millisecond)

@@ -138,7 +138,7 @@ func setupIntegration(t *testing.T) *integration {
 	}
 	build(e.binary, ".")
 	build(filepath.Join(e.binDir, "codex"), "./testdata/agent")
-	if err := os.Link(filepath.Join(e.binDir, "codex"), filepath.Join(e.binDir, "pi")); err != nil {
+	if err := os.Link(filepath.Join(e.binDir, "codex"), filepath.Join(e.binDir, "claude")); err != nil {
 		t.Fatal(err)
 	}
 	socket := filepath.Join(dir, "socket")
@@ -459,7 +459,7 @@ func TestTmuxAutomaticReviewCycle(t *testing.T) {
 			if strings.Contains(text, "MANUAL:") {
 				t.Fatal("message was pasted into a shell")
 			}
-			if _, err := tmux("respawn-pane", "-k", "-t", reviewer, filepath.Join(e.binDir, "pi"), "fixture"); err != nil {
+			if _, err := tmux("respawn-pane", "-k", "-t", reviewer, filepath.Join(e.binDir, "claude"), "fixture"); err != nil {
 				t.Fatal(err)
 			}
 			e.waitFor(t, "queued message delivered after restart", func() bool {

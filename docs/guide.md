@@ -4,7 +4,7 @@
 
 ## Build and install
 
-Use Linux or macOS with tmux and `ps`. Building requires Go 1.22 or later, as declared in [go.mod](../go.mod). To launch both agents automatically, install and configure the `codex` and `pi` CLIs first; 2mux uses their existing accounts, models and permission settings. A compiled 2mux binary does not require Go at runtime.
+Use Linux or macOS with tmux and `ps`. Building requires Go 1.22 or later, as declared in [go.mod](../go.mod). To launch both agents automatically, install and configure the `codex` and `claude` CLIs first; 2mux uses their existing accounts, models and permission settings. A compiled 2mux binary does not require Go at runtime.
 
 From the 2mux source checkout, build into a directory you own:
 
@@ -27,9 +27,9 @@ cd /path/to/project
 2mux start --agents
 ```
 
-For a new session, Codex starts in the WORKER pane on the left and pi in the REVIEWER pane on the right. Finish each CLI's initial trust, login or permission dialogs, then enter a concrete task in Codex. Role instructions alone tell the agents to wait; they do not start project work.
+For a new session, Codex starts in the WORKER pane on the left and Claude Code in the REVIEWER pane on the right. Finish each CLI's initial trust, login or permission dialogs, then enter a concrete task in Codex. Role instructions alone tell the agents to wait; they do not start project work.
 
-Both agents use the same directory and working tree. The worker implements the task and sends the reviewer a summary, changed files and test results. The reviewer is instructed to inspect files and relevant tests without editing project files, then return `CORRECTIONS` or `APPROVED`. The worker applies actionable corrections and requests another review, ending the cycle on approval. These are agent instructions, not a filesystem access boundary.
+Both agents use the same directory and working tree. The worker implements the task and sends the reviewer a message starting with `READY_FOR_REVIEW`: a summary, changed files, exact validation commands and results, and open questions. The reviewer is instructed to inspect `git status` and the diff, including untracked files, and may run read-only checks or tests, but never edits files or changes git state. It replies once per request: `APPROVED` with a one-line justification, or `CORRECTIONS` as a numbered list with `file:line`, the problem and the expected fix. On a re-review it verifies the previous corrections first. The worker applies the corrections and requests another review, stops on approval without replying to it, and does not commit or push unless asked. These are agent instructions, not a filesystem access boundary; the managed and manual reviewer launches additionally deny Claude Code's `Edit`, `Write` and `NotebookEdit` tools, while shell commands remain subject to Claude Code's normal permissions.
 
 You can also submit the task from another terminal in the project directory:
 
@@ -87,7 +87,7 @@ exec codex "$(2mux prompt worker)"
 In the REVIEWER pane:
 
 ```sh
-exec pi --append-system-prompt "$(2mux prompt reviewer)"
+exec claude --append-system-prompt "$(2mux prompt reviewer)" --disallowedTools "Edit Write NotebookEdit"
 ```
 
 Run these from the project directory with `2mux` in `PATH`. `exec` replaces the shell, preventing a later delivery from entering that shell after the agent exits. Regenerate role prompts after recreating a session because the queue address changes.
@@ -108,7 +108,7 @@ Start with:
 | Symptom | What to do |
 | --- | --- |
 | `tmux ... not found in PATH` | Make tmux available to the launching shell and retry. |
-| `codex` or `pi` is required | Make both configured CLIs available in `PATH` before `start --agents`. |
+| `codex` or `claude` is required | Make both configured CLIs available in `PATH` before `start --agents`. |
 | Pane is waiting for an interactive agent | Complete manual launch or inspect the foreground program. Messages wait while a shell or an unrecognized process is present. |
 | Pane is in copy mode or has input disabled | Exit copy mode or restore pane input, then check the queue again. |
 | Bridge is stopped, or an agent's send prints `Warning: 2mux bridge is ...` | Run `2mux start --detach` from the same directory to restart it without attaching. Queued messages are then delivered. |

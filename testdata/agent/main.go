@@ -13,7 +13,7 @@ import (
 
 func main() {
 	role := "worker"
-	if filepath.Base(os.Args[0]) == "pi" {
+	if filepath.Base(os.Args[0]) == "claude" {
 		role = "reviewer"
 	}
 	dir := os.Getenv("TWOMUX_FIXTURE_DIR")

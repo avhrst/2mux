@@ -2,7 +2,7 @@
 
 [Українська версія](README.uk.md) · [Project README](../README.md)
 
-2mux opens a Codex worker and a pi reviewer in a shared project, and delivers their feedback through a local queue and tmux bridge.
+2mux opens a Codex worker and a Claude Code reviewer in a shared project, and delivers their feedback through a local queue and tmux bridge.
 
 | Document | What you will find | Українською |
 | --- | --- | --- |

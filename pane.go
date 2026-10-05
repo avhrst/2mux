@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -56,13 +57,17 @@ func (w paneWatch) observe(pane, screen string, now time.Time) error {
 	return nil
 }
 
-// Phrases from Codex approval and trust dialogs and generic terminal
+// Phrases from Codex and Claude Code approval and trust dialogs and generic terminal
 // confirmations. Only the bottom of the screen is checked, where dialogs and
 // prompts render, so older transcript text rarely matches.
 var confirmationPhrases = []string{
 	"would you like to run the following command",
 	"would you like to make the following edits",
 	"yes, proceed",
+	"do you want to proceed",
+	"do you want to make this edit",
+	"do you want to create",
+	"esc to cancel",
 	"don't ask again",
 	"press enter to confirm",
 	"enter to confirm",
@@ -137,7 +142,7 @@ func paneCanReceive(paneID string) error {
 	if len(fields) != 4 || fields[0] != "0" || fields[1] != "0" || fields[2] != "0" {
 		return fmt.Errorf("pane %s is dead, in copy mode, or has input disabled", paneID)
 	}
-	// node alone is not evidence of pi. Inspect only foreground processes on
+	// node alone is not evidence of Claude Code. Inspect only foreground processes on
 	// this terminal; a shell that remains after the agent exits is rejected.
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -147,7 +152,7 @@ func paneCanReceive(paneID string) error {
 		return fmt.Errorf("inspect foreground agent in pane %s: %w", paneID, err)
 	}
 	if !hasForegroundAgent(string(processes)) {
-		return fmt.Errorf("pane %s is waiting for an interactive Codex or pi agent", paneID)
+		return fmt.Errorf("pane %s is waiting for an interactive Codex or Claude Code agent", paneID)
 	}
 	return nil
 }
@@ -159,21 +164,22 @@ func hasForegroundAgent(processes string) bool {
 			continue
 		}
 		program := filepath.Base(fields[1])
-		if program == "codex" || program == "pi" {
+		if program == "codex" || program == "claude" {
+			return true
+		}
+		// The native Claude Code installer runs a binary named after its
+		// version (~/.local/share/claude/versions/X.Y.Z) with argv0 "claude".
+		if claudeVersion.MatchString(program) && filepath.Base(fields[2]) == "claude" {
 			return true
 		}
 		if program == "node" || program == "bun" {
-			// Current pi sets process.title to "pi", replacing its argv on Unix.
-			if len(fields) == 3 && fields[2] == "pi" {
-				return true
-			}
-			// Only the script entry point identifies the agent. A pi path in
-			// app arguments or runtime options must not authorize a paste.
+			// Only the script entry point identifies the agent. A Claude Code
+			// path in app arguments or runtime options must not authorize a paste.
 			scriptIndex := 3
 			if program == "bun" && len(fields) > scriptIndex && fields[scriptIndex] == "run" {
 				scriptIndex++
 			}
-			if len(fields) > scriptIndex && isPiEntrypoint(fields[scriptIndex]) {
+			if len(fields) > scriptIndex && isClaudeEntrypoint(fields[scriptIndex]) {
 				return true
 			}
 		}
@@ -181,16 +187,18 @@ func hasForegroundAgent(processes string) bool {
 	return false
 }
 
-func isPiEntrypoint(path string) bool {
+var claudeVersion = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
+
+func isClaudeEntrypoint(path string) bool {
 	if strings.HasPrefix(path, "-") {
 		return false
 	}
-	if filepath.IsAbs(path) && filepath.Base(path) == "pi" {
+	if filepath.IsAbs(path) && filepath.Base(path) == "claude" {
 		resolved, err := filepath.EvalSymlinks(path)
 		if err != nil {
 			return false
 		}
 		path = resolved
 	}
-	return strings.Contains(path, "/pi-coding-agent/") && strings.HasSuffix(path, ".js")
+	return strings.Contains(path, "/@anthropic-ai/claude-code/") && strings.HasSuffix(path, ".js")
 }
