@@ -71,7 +71,7 @@ func prepareNative(name, cwd, dir string, cfg sessionConfig) error {
 	if !cfg.CodexAPI {
 		return nil
 	}
-	return prepareCodex(name, cwd, dir, cfg)
+	return prepareCodex(name, cwd, dir)
 }
 
 func initializeNativeConfig(dir string, cfg *sessionConfig) error {
@@ -103,7 +103,7 @@ func initializeNativeConfig(dir string, cfg *sessionConfig) error {
 
 // prepareCodex starts the app-server backend when needed and guarantees that
 // the configured worker thread can be resumed by the native TUI.
-func prepareCodex(name, cwd, dir string, cfg sessionConfig) error {
+func prepareCodex(name, cwd, dir string) error {
 	lock, err := waitLock(filepath.Join(dir, "codex-thread.lock"), 5*time.Second, "codex thread setup is still in progress")
 	if err != nil {
 		return err
@@ -111,7 +111,7 @@ func prepareCodex(name, cwd, dir string, cfg sessionConfig) error {
 	defer lock.Close()
 	// The bridge and respawn can both discover a stale thread. Only one may
 	// replace it, and neither may overwrite the other's saved replacement.
-	cfg, err = readSessionConfig(dir)
+	cfg, err := readSessionConfig(dir)
 	if err != nil {
 		return err
 	}
@@ -258,6 +258,8 @@ type nativeTransport struct {
 	panes paneWatch
 	// prompt builds the worker role instructions; nil uses rolePrompt.
 	prompt func() (string, error)
+	// seen is session.json as last read under codex-thread.lock.
+	seen os.FileInfo
 }
 
 func (t *nativeTransport) close() {
@@ -267,11 +269,29 @@ func (t *nativeTransport) close() {
 	}
 }
 func (t *nativeTransport) connect() error {
+	path := filepath.Join(t.dir, "session.json")
+	// The bridge calls connect every tick. A live connection needs no lock
+	// while session.json is unchanged; writeJSON replaces it by rename, so
+	// every write changes its identity.
+	if t.rpc != nil && t.seen != nil {
+		select {
+		case <-t.rpc.done:
+		default:
+			if info, err := os.Stat(path); err == nil && os.SameFile(info, t.seen) && info.ModTime().Equal(t.seen.ModTime()) && info.Size() == t.seen.Size() {
+				return nil
+			}
+		}
+	}
 	lock, err := waitLock(filepath.Join(t.dir, "codex-thread.lock"), 5*time.Second, "codex thread setup is still in progress")
 	if err != nil {
 		return err
 	}
 	defer lock.Close()
+	// Stat before reading: a write in between is caught on the next call.
+	seen, err := os.Stat(path)
+	if err != nil {
+		seen = nil
+	}
 	cfg, err := readSessionConfig(t.dir)
 	if err != nil {
 		return err
@@ -288,6 +308,7 @@ func (t *nativeTransport) connect() error {
 		case <-t.rpc.done:
 			t.close()
 		default:
+			t.seen = seen
 			return nil
 		}
 	}
@@ -311,6 +332,9 @@ func (t *nativeTransport) connect() error {
 		t.close()
 		return fmt.Errorf("codex receipt reconciliation: %w", err)
 	}
+	// A replacement saved by ensureWorkerThread changed session.json after the
+	// stat above, so the next call re-reads it once before using the fast path.
+	t.seen = seen
 	data, _ := json.Marshal(map[string]any{"threadId": t.cfg.CodexThread, "status": thread.Status})
 	t.event(rpcEnvelope{Method: "thread/status/changed", Params: data})
 	return nil

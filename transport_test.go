@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func fakeNativeVersions(t *testing.T, codex, claude string) {
@@ -238,5 +239,47 @@ func TestNativeInitializationKeepsSavedThreadReplacement(t *testing.T) {
 	saved, err := readSessionConfig(dir)
 	if err != nil || saved != current || stale != current {
 		t.Fatalf("native setup overwrote a saved replacement: %+v: %v", saved, err)
+	}
+}
+
+func TestNativeConnectSkipsLockWhileConfigUnchanged(t *testing.T) {
+	dir := shortNativeQueueDir(t)
+	cfg := sessionConfig{CWD: "/project", CodexAPI: true, CodexThread: "thread"}
+	if err := writeSessionConfig(dir, cfg); err != nil {
+		t.Fatal(err)
+	}
+	f := &fakeThreads{persisted: map[string]bool{"thread": true}}
+	if err := os.Symlink(fakeCodex(t, f.handle), filepath.Join(dir, "codex.sock")); err != nil {
+		t.Fatal(err)
+	}
+	tr := &nativeTransport{dir: dir, cfg: cfg, prompt: rolePromptStub}
+	defer tr.close()
+	if err := tr.connect(); err != nil {
+		t.Fatal(err)
+	}
+	lock, ok, err := tryLock(filepath.Join(dir, "codex-thread.lock"))
+	if err != nil || !ok {
+		t.Fatalf("lock: %v %v", ok, err)
+	}
+	started := time.Now()
+	if err := tr.connect(); err != nil || time.Since(started) > time.Second {
+		t.Fatalf("live connection with unchanged config waited for the lock: %v", err)
+	}
+	seen := tr.seen
+	// Any rewrite, even of identical content, must be re-read under the lock.
+	if err := writeSessionConfig(dir, cfg); err != nil {
+		t.Fatal(err)
+	}
+	lock.Close()
+	if err := tr.connect(); err != nil {
+		t.Fatal(err)
+	}
+	if os.SameFile(seen, tr.seen) {
+		t.Fatal("rewritten session config was not re-read")
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.resumes) != 1 {
+		t.Fatalf("unchanged thread reconnected: %d resumes", len(f.resumes))
 	}
 }

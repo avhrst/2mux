@@ -664,7 +664,7 @@ func respawnRole(name, cwd, role string) error {
 		}
 		// The TUI exits immediately on a thread it cannot resume.
 		if cfg.CodexAPI {
-			if err := prepareCodex(name, cwd, dir, cfg); err != nil {
+			if err := prepareCodex(name, cwd, dir); err != nil {
 				return err
 			}
 		}
