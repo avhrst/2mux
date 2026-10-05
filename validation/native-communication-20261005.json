@@ -1,0 +1,64 @@
+{
+  "date": "2026-10-05",
+  "platform": "macOS arm64",
+  "codex_version": "0.159.2",
+  "claude_version": "2.1.289",
+  "gates": {
+    "G1": {
+      "status": "passed",
+      "evidence": "TWOMUX_PROTOCOL_SMOKE=1 go test -v -run TestNativeCodexProtocol -count=1",
+      "checks": [
+        "isolated per-process Unix socket",
+        "socket mode 0600 in directory 0700",
+        "WebSocket Upgrade",
+        "initialize",
+        "thread/start",
+        "thread/queue/add",
+        "thread/queue/list",
+        "clean process shutdown",
+        "second WebSocket client thread/resume identity",
+        "reconnect and thread/resume after isolated app-server restart"
+      ],
+      "inference_requested": false
+    },
+    "G2": {
+      "status": "unverified",
+      "reason": "Native TUI requires user startup-dialog confirmation; multi-client approval routing has not been observed. --codex-api prints an explicit experimental warning."
+    },
+    "G3": {
+      "status": "partial",
+      "evidence": "Two queue/add calls with identical clientUserMessageId produced one queue entry. Real userMessage clientId receipt requires a live TUI turn. No retry behavior is inferred."
+    },
+    "G4": {
+      "status": "unverified",
+      "reason": "Claude development-channel dialog shown in an isolated TUI; user consent and real notification/ack/reply turn remain pending. MCP fake-client tests are not registration evidence."
+    },
+    "G5": {
+      "status": "unverified",
+      "reason": "Account/org/provider channel-policy acceptance must be verified in native startup notice before sending."
+    }
+  },
+  "automated_validation": {
+    "unit_race": "passed",
+    "legacy_tmux_integration": "passed including LegacyHooksOnlyObserve",
+    "native_process_presence": "passed",
+    "native_protocol": "passed including isolated server restart/resume; no inference",
+    "installed_experimental_schema": "passed",
+    "go_vet": "passed",
+    "staticcheck": "passed (v0.8.1)",
+    "go122_unit": "passed with -ldflags=-linkmode=external; default internal linker aborts on this macOS with missing LC_UUID",
+    "linux_amd64_build": "passed with Go 1.27.1 and Go 1.22.12",
+    "fake_protocols": "passed; not live approval or Channel policy proof"
+  },
+  "authorization": {
+    "approval_response_by_2mux": false,
+    "automatic_dialog_confirmation": false,
+    "permission_bypass_flags": false,
+    "channel_permission_relay": false
+  },
+  "recovery": {
+    "automatic_resend_after_attempt": false,
+    "channel_ack_timeout_seconds": 90,
+    "typed_records_retained_for_correlation": true
+  }
+}

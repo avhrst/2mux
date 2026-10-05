@@ -1,0 +1,42 @@
+{
+  "date": "2026-10-05",
+  "observed_at": "2026-10-05T13:39:03.914844+00:00",
+  "scope": "Current project pair; worker uses tmux and reviewer uses Claude MCP Channel.",
+  "status": "partial",
+  "outbound": {
+    "id": "738ca028401a9a0fc2046112c21fbbd4",
+    "from": "worker",
+    "to": "reviewer",
+    "kind": "note",
+    "status": "accepted",
+    "transport": "claude-channel",
+    "attempt": 1,
+    "created": "2026-10-05T13:28:45.274801Z",
+    "submitted_at": "2026-10-05T13:28:45.44251Z"
+  },
+  "return": {
+    "id": "f85e8c55961d2b9c60e7d91cdd90d39b",
+    "from": "reviewer",
+    "to": "worker",
+    "kind": "note",
+    "reply_to": "738ca028401a9a0fc2046112c21fbbd4",
+    "status": "queued",
+    "transport": "tmux",
+    "created": "2026-10-05T13:28:53.18212Z",
+    "submitted_at": "0001-01-01T00:00:00Z",
+    "error": "waiting for pane %0 to become idle"
+  },
+  "reviewer_response": "COMMUNICATION_OK: отримано через Channel, ack виконано.",
+  "verified": [
+    "Live Claude Channel notification reached the reviewer.",
+    "Reviewer explicitly acknowledged the exact diagnostic message ID.",
+    "Reviewer queued a reply with the exact reply_to via the native Channel reply tool."
+  ],
+  "limits": [
+    "This is a diagnostic note, not a review request or approval.",
+    "The return receipt is a snapshot: queued means no automatic worker terminal submission was proven at observation time.",
+    "A busy worker pane holds tmux return delivery until the quiet-screen checks pass.",
+    "Codex API transport and multi-client tool approval routing were not exercised.",
+    "Existing native-communication-20261005.json remains the earlier protocol-validation snapshot."
+  ]
+}

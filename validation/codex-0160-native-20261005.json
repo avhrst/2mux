@@ -1,0 +1,76 @@
+{
+  "date": "2026-10-05",
+  "codex_version": "0.160.0",
+  "scope": "Codex native compatibility check and explicit transport reporting; current pair remains mixed.",
+  "observed_current_transports": {
+    "worker": "tmux",
+    "reviewer": "claude-channel"
+  },
+  "communication_test_receipts": [
+    {
+      "id": "51aa1367e1600347a29b5399755ac9f3",
+      "from": "worker",
+      "to": "reviewer",
+      "transport": "claude-channel",
+      "status": "accepted",
+      "created": "2026-10-05T19:38:54.732233Z",
+      "last_receipt_write": "2026-10-05T19:38:56.822064+00:00",
+      "seconds_until_last_receipt_write": 2.09
+    },
+    {
+      "id": "4a8aacb5bb1ee910b7748542e2dccf72",
+      "from": "reviewer",
+      "to": "worker",
+      "transport": "tmux",
+      "status": "delivered",
+      "created": "2026-10-05T19:39:00.750104Z",
+      "last_receipt_write": "2026-10-05T19:40:23.175317+00:00",
+      "seconds_until_last_receipt_write": 82.425
+    }
+  ],
+  "diagnosis": [
+    "Old native version gate allowed only Codex 0.159.2 and silently disabled CodexAPI for installed 0.160.0.",
+    "Legacy tmux screen-quiescence check holds worker delivery while the Working timer changes the screen."
+  ],
+  "changes": [
+    "Allow precisely validated Codex 0.159.2 and 0.160.0.",
+    "Reject unsupported explicit native requests before creating a new session; never fall back or replay attempted receipts.",
+    "Expose per-role configured transports in plain and JSON status."
+  ],
+  "protocol_validation": {
+    "status": "passed",
+    "command": "TWOMUX_PROTOCOL_SMOKE=1 go test -v -run ^TestNativeCodexProtocol$ -count=1 .",
+    "inference_requested": false,
+    "checks": [
+      "isolated Unix socket mode 0600",
+      "WebSocket initialize",
+      "thread/start",
+      "thread/queue/add and list with clientUserMessageId",
+      "second client thread/resume identity",
+      "isolated app-server restart and resume"
+    ]
+  },
+  "schema_validation": {
+    "status": "passed",
+    "checks": [
+      "installed 0.160.0 generated experimental schema",
+      "thread queue and item methods",
+      "clientUserMessageId",
+      "expectedTurnId",
+      "userMessage clientId"
+    ]
+  },
+  "limits": [
+    "Current worker was not restarted or converted to native mode.",
+    "Codex native TUI inference and multi-client approval routing were not exercised.",
+    "Immediate native submission does not imply active-turn processing; ordinary input is queued and --steer is explicit."
+  ],
+  "automated_validation": {
+    "targeted_race_integration_protocol": "passed",
+    "full_race_integration_native_protocol": "passed, 39.100s",
+    "command": "TWOMUX_INTEGRATION=1 TWOMUX_NATIVE_SMOKE=1 TWOMUX_PROTOCOL_SMOKE=1 go test -race -count=1 ./...",
+    "go_vet": "passed",
+    "macos_build": "passed",
+    "linux_amd64_cross_build": "passed"
+  }
+}

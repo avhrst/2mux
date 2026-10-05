@@ -1,0 +1,41 @@
+{
+  "date": "2026-10-05",
+  "codex_version": "codex-cli 0.160.0",
+  "scope": "Missing rollout during native worker TUI bootstrap and recovery from stale saved thread IDs.",
+  "implementation": [
+    "Name each new worker thread through thread/name/set before closing the bootstrap connection; no model turn is started.",
+    "On RPC -32600 with no rollout found, persist an empty CodexThread before attempting replacement and save the replacement only after persistence succeeds.",
+    "Use the same recovery and thread ID/CWD checks for bootstrap and bridge reconnect.",
+    "Serialize thread/config recovery and follow a saved replacement even when the bridge still has an old live connection.",
+    "Keep unresolved receipts uncertain after recovery; do not resubmit messages automatically."
+  ],
+  "real_codex_evidence": [
+    "thread/start alone reproduced no rollout found after the creating connection closed.",
+    "A named empty thread resumed through a distinct client after bootstrap disconnected and after app-server restarted.",
+    "The installed native TUI reached its idle prompt on initial --codex-api launch and on worker respawn after backend restart.",
+    "The worker retained the same thread ID and thread/resume reported zero turns after the TUI restart."
+  ],
+  "fixture_evidence": [
+    "The fake app-server discards a thread with no turns and no persisted metadata when its creating connection closes.",
+    "First native launch, worker/backend restart before the first turn, bootstrap stale-ID recovery and bridge stale-ID recovery passed.",
+    "Other resume errors and identity/CWD mismatches preserve the saved ID/config.",
+    "Prompt, thread/start and thread/name/set failures after missing-rollout recovery leave the invalid ID cleared."
+  ],
+  "validation": [
+    {
+      "command": "TWOMUX_INTEGRATION=1 TWOMUX_CODEX_LIVE=1 TWOMUX_PROTOCOL_SMOKE=1 TWOMUX_NATIVE_SMOKE=1 go test -race -count=1 -v ./...",
+      "result": "PASS, github.com/avhrst/2mux, 44.919s",
+      "local_log": "/tmp/2mux-codex-crash-fix-tests.log"
+    },
+    { "command": "go vet ./...", "result": "PASS" },
+    { "command": "go build -o /tmp/2mux-codex-crash-fix .", "result": "PASS, macOS" },
+    { "command": "GOOS=linux GOARCH=amd64 go build -o /tmp/2mux-codex-crash-fix-linux .", "result": "PASS" },
+    { "command": "git diff --check", "result": "PASS" }
+  ],
+  "boundaries": [
+    "Real startup checks use disposable projects, homes and tmux servers; the TUI check uses a nonfunctional test credential without reading user credentials.",
+    "No inference turn or tool approval was submitted. Multi-client approval routing remains unverified.",
+    "Codex 0.159.2 remains in the existing supported gate; this correction was exercised against installed 0.160.0.",
+    "No existing user worker/backend process was restarted by these tests."
+  ]
+}

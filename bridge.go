@@ -153,8 +153,14 @@ func runBridge(name, cwd, dir string) error {
 	if err := writeJSON(filepath.Join(dir, "health.json"), h); err != nil {
 		return err
 	}
-	panes := paneWatch{}
-	var failingSince, lastArchive time.Time
+	cfg, err := readSessionConfig(dir)
+	if err != nil {
+		return err
+	}
+	transport := &nativeTransport{dir: dir, cfg: cfg, panes: paneWatch{}}
+	defer transport.close()
+	var failingSince, lastArchive, lastStateCheck time.Time
+	statusLine := ""
 	ticker := time.NewTicker(300 * time.Millisecond)
 	defer ticker.Stop()
 	for {
@@ -174,21 +180,46 @@ func runBridge(name, cwd, dir string) error {
 		} else {
 			failingSince = time.Time{}
 			h.LastError = ""
-			err := deliverQueue(dir, func(m message) error {
-				pane, err := rolePane(name, m.To)
-				if err != nil {
-					return err
+			if cfg.CodexAPI {
+				if err := transport.connect(); err != nil {
+					_ = writeAgentState(dir, agentState{Role: roleWorker, State: "unknown", Source: "codex-api", SessionID: transport.cfg.CodexThread})
+					h.LastError = err.Error()
 				}
-				return panes.ready(pane, time.Now())
+			}
+			transport.poll()
+			if time.Since(lastStateCheck) >= time.Second {
+				lastStateCheck = time.Now()
+				if !cfg.CodexAPI {
+					observeLegacyWorker(name, dir)
+				}
+				// A dead pane cannot retain a previous hook's idle/busy state.
+				for _, role := range roles {
+					state := readAgentState(dir, role)
+					if state.Source == "none" {
+						continue
+					}
+					_, exists, alive, probeErr := registeredPane(name, role)
+					if probeErr == nil && (!exists || !alive) && state.State != "exited" {
+						state.State, state.TurnID = "exited", ""
+						_ = writeAgentState(dir, state)
+					}
+				}
+				if cfg.CodexAPI || cfg.ClaudeSession != "" || cfg.ClaudeChannel || readAgentState(dir, roleWorker).Source != "none" {
+					line := "2mux W:" + observedAgentState(dir, roleWorker).State + " R:" + observedAgentState(dir, roleReviewer).State
+					if line != statusLine {
+						if _, err := tmux("set-option", "-t", sessionTarget(name), "status-right", line); err == nil {
+							statusLine = line
+						}
+					}
+				}
+			}
+			err := deliverQueueTransport(dir, func(m message) error {
+				return transport.ready(name, m)
 			}, func(m message) error {
 				// Keep health fresh within a batch of several deliveries.
 				writeHealth()
-				pane, err := rolePane(name, m.To)
-				if err != nil {
-					return err
-				}
-				return sendText(pane, formatMessage(m))
-			})
+				return transport.submit(name, m)
+			}, transport.choose, transport.owns)
 			if err != nil {
 				h.LastError = err.Error()
 			}

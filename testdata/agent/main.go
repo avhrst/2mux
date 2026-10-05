@@ -16,10 +16,32 @@ func main() {
 	if filepath.Base(os.Args[0]) == "claude" {
 		role = "reviewer"
 	}
+	if len(os.Args) == 2 && os.Args[1] == "--version" {
+		if role == "worker" {
+			fmt.Println("codex-cli 0.160.0")
+		} else {
+			fmt.Println("2.1.289 (Claude Code)")
+		}
+		return
+	}
 	dir := os.Getenv("TWOMUX_FIXTURE_DIR")
 	binary := os.Getenv("TWOMUX_BINARY")
 	if dir == "" || binary == "" {
 		panic("fixture environment missing")
+	}
+	if role == "worker" && len(os.Args) > 1 && os.Args[1] == "app-server" {
+		if err := runCodexServer(dir, strings.TrimPrefix(os.Args[3], "unix://")); err != nil {
+			panic(err)
+		}
+		return
+	}
+	if role == "worker" && len(os.Args) > 1 && os.Args[1] == "--remote" {
+		close, err := resumeCodexThread(strings.TrimPrefix(os.Args[2], "unix://"), os.Args[4])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "thread/resume failed during TUI bootstrap:", err)
+			os.Exit(1)
+		}
+		defer close()
 	}
 	stty := exec.Command("stty", "raw", "-echo")
 	stty.Stdin = os.Stdin
@@ -65,6 +87,19 @@ func main() {
 			}
 			text := string(prompt)
 			prompt = nil
+			if strings.HasPrefix(text, "STATE:") {
+				// Explicit Codex control frames for the legacy state observer test.
+				frame := "unrecognized screen"
+				switch strings.TrimSpace(strings.TrimPrefix(text, "STATE:")) {
+				case "idle":
+					frame = "› Ask Codex to do anything\r\n\r\n  ? for shortcuts"
+				case "busy":
+					frame = "• Working (3s • esc to interrupt)\r\n\r\n› Ask Codex to do anything\r\n\r\n  ? for shortcuts"
+				case "approval":
+					frame = "Would you like to run the following command?\r\n› 1. Yes, proceed (y)"
+				}
+				fmt.Print("\x1b[2J\x1b[H" + frame)
+			}
 			if strings.Contains(text, "DIALOG:") {
 				// Imitate a native approval prompt that Enter would answer.
 				// Draw it before logging, so the test only proceeds once it is visible.

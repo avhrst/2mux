@@ -52,11 +52,15 @@ Validation: go test -race ./... passed.
 MESSAGE
 ```
 
-The reviewer replies using `2mux send worker`. An operator can also send a task or message with `2mux send worker "Your task"`. Message bodies can contain multiple lines and UTF-8 text, up to 64 KiB. Terminal and bidirectional control characters are rejected, as are lines starting with `[2mux`, so a body cannot imitate a message header. Printing `<READY_FOR_REVIEW>` or `<CORRECTION>` alone does not send anything; the transport is the command, independent of terminal output and redraws.
+Workers request review with `--from worker --kind review_request` and a body starting with `READY_FOR_REVIEW`. For a typed request received through tmux, the reviewer replies using `--from reviewer --kind verdict --reply-to EXACT_REQUEST_ID --verdict APPROVED` (or `CORRECTIONS`). Through Claude Channel, it calls `ack` first, then `reply` with that exact ID and verdict. Plain operator notes, like the example above, remain untyped. See the [review workflow](docs/guide.md#review-messages) and [peer communication check](docs/guide.md#verify-peer-communication). An operator can also send a task or message with `2mux send worker "Your task"`. Message bodies can contain multiple lines and UTF-8 text, up to 64 KiB. Terminal and bidirectional control characters are rejected, as are lines starting with `[2mux` or `╭─ 2mux ·`, so a body cannot imitate a message header. Printing `<READY_FOR_REVIEW>` or `<CORRECTION>` alone does not send anything; the transport is the command, independent of terminal output and redraws.
 
-The bridge records each message before delivering it and pastes it as a single prompt between a header and an end marker, then submits it. It uses tmux's [bracketed paste support](https://man.openbsd.org/tmux.1#paste-buffer). Delivery waits while the target pane is a shell, is dead, is in copy mode, has disabled input, or is not running an identifiable Codex/Claude Code foreground process. It also waits until the pane's screen has been unchanged for one second and while a confirmation dialog (such as a Codex command approval or a Claude Code permission prompt) is visible, so Enter never answers that dialog. Managed launches and the manual `exec` examples leave no shell behind when an agent exits. Answer native CLI confirmations yourself. Avoid typing in a pane while incoming messages are being submitted.
+In the default mode, the bridge records each message before delivering it and pastes it as a single prompt between a header and an end marker, then submits it. It uses tmux's [bracketed paste support](https://man.openbsd.org/tmux.1#paste-buffer). Delivery waits while the target pane is a shell, is dead, is in copy mode, has disabled input, or is not running an identifiable Codex/Claude Code foreground process. It also waits until the pane's screen has been unchanged for one second and while a confirmation dialog (such as a Codex command approval or a Claude Code permission prompt) is visible, so delivery waits for known dialogs to close. Detection is heuristic. Managed launches and the manual `exec` examples leave no shell behind when an agent exits. Answer native CLI confirmations yourself. Avoid typing in a pane while incoming messages are being submitted.
 
 `queued` means accepted into the local queue. `delivered` means submitted to the terminal; it is **not** proof that the model received, understood, or completed the request. The receiving CLI controls how prompts are queued while it is busy.
+
+Messages and send/ack/reply receipts use compact role cards. Cyan WORKER and violet REVIEWER pane headers show the last exchange's direction, type and receipt state; narrow panes use shorter labels. Agents are instructed to summarize peer exchanges in their normal CLI conversation. After rebuilding, `2mux start --detach` applies the headers to an existing pair. See [visible communication](docs/guide.md#visible-communication-in-the-cli) for previews, refresh and running-session behavior.
+
+The status bar observes legacy Codex WORKER controls for `busy`, `idle` and supported approval dialogs, with `source: "codex-tui"` in JSON status. Unrecognized screens remain `unknown`. A running bridge needs a restart after rebuilding to acquire this observer. See [state reporting](docs/cli.md#native-options-and-correlation).
 
 ## Commands
 
@@ -94,10 +98,32 @@ go test -race ./...
 go vet ./...
 TWOMUX_INTEGRATION=1 go test -race -v ./...
 TWOMUX_NATIVE_SMOKE=1 go test -v -run TestInstalledAgentPresence
+TWOMUX_CODEX_LIVE=1 go test -v -run TestRealCodex
 ```
 
 The opt-in integration test uses a separate tmux socket and deterministic local TUI fixtures. It exercises concurrent first starts with shells and agents, the complete worker → reviewer → corrections → rereview → approval cycle, multiline UTF-8, detach, pane swaps, extra windows, bridge recovery, duplicate prevention, copy mode, disabled input, confirmation dialogs, shell safety, exited-agent respawn and session ownership. It makes no model or network calls and does not use your tmux sessions. CI runs it on Linux and macOS with Go 1.22 and the current stable release. The separate native smoke test starts installed Codex and Claude Code without submitting a model prompt and checks their process identification. Real model responses and CLI prompt queue behavior require testing with your installed agents.
 
+The Codex live startup check uses the installed CLI with a temporary home, a nonfunctional test credential and no model turns. It verifies empty-thread persistence, first TUI launch and respawn after backend restart. Tool approval routing is a separate validation gate.
+
 An earlier Codex + pi pair, before the reviewer switched to Claude Code, also completed a live automatic file-review scenario; see the [review findings](REVIEW.md) and [receipts](validation/live-review-20260930.json).
 
-2mux uses the Go standard library, tmux and `ps`. See [LICENSE](LICENSE).
+2mux uses Go, tmux and `ps`; the optional Codex API transport also uses `github.com/coder/websocket`. See [LICENSE](LICENSE) and [third-party notices](THIRD_PARTY_NOTICES.md).
+
+## Experimental native communication
+
+```sh
+2mux start --native
+# Or enable only one transport:
+2mux start --codex-api
+2mux start --claude-channel
+2mux status --json
+2mux watch
+```
+
+These flags launch both agents in a **new** session. Codex uses a private app-server Unix socket and its native remote TUI; messages enter `thread/queue/add` with the exact message ID. Claude uses a local MCP Channel and its `ack`/`reply` tools. Neither transport pastes into its target pane. The default remains tmux paste. Tested wire versions are Codex CLI **0.159.2 / 0.160.0** and Claude Code **2.1.289**; an unsupported native version fails before a new session is created, without falling back to tmux. `status` and `status --json` show the configured transport for each role. See [native communication](docs/guide.md#experimental-native-communication) for startup, review and recovery.
+
+Claude Channels are a research preview requiring a supported Claude account/policy. The opt-in launch prints and passes `--dangerously-load-development-channels server:twomux`; confirm its development-channel dialog at every launch and any MCP consent yourself. 2mux never confirms these dialogs or answers tool approvals, and does not enable permission bypass or permission relay. MCP connectivity alone does not prove Channel registration or receipt.
+
+`submitted` means the native transport accepted the write; `accepted` means the exact ID appeared in a Codex user item or Claude explicitly acknowledged it. Neither means the task is done. Review requests and verdicts use `--kind`, `--reply-to` and `--verdict`; a verdict for a changed Git scope is rejected. Once an attempt starts, its transport is fixed. Missing receipts after reconnect become `uncertain`, with no automatic replay.
+
+The isolated native Codex protocol probe passes. The earlier [protocol-validation snapshot](validation/native-communication-20261005.json) leaves live TUI gates unverified. A later [live communication check](validation/communication-20261005.json) confirms Channel notification, exact-ID ack and correlated reply in the current mixed pair; its saved return receipt records whether worker terminal delivery completed. Codex API multi-client approval routing remains unverified. These are experimental options, not a claim that every account or preview version is supported.

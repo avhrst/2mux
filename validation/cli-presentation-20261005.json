@@ -1,0 +1,41 @@
+{
+  "date": "2026-10-05",
+  "observed_at": "2026-10-05T14:15:58.133880+00:00",
+  "features": [
+    "Incoming role card precedes protocol metadata.",
+    "Send and Channel ack/reply receipts contain bounded Unicode previews.",
+    "Cyan WORKER and violet REVIEWER pane headers expose direction, receipt state and type.",
+    "Panes under 60 columns use compact role labels and peer initials.",
+    "Full message text and exact-ID protocol boundaries are retained."
+  ],
+  "validation": {
+    "race_integration_native_smoke": {
+      "command": "TWOMUX_INTEGRATION=1 TWOMUX_NATIVE_SMOKE=1 go test -race -count=1 ./...",
+      "result": "passed",
+      "elapsed_seconds": 26.7,
+      "earlier_failure": "One earlier run failed with macOS PTY fork failed: Device not configured. It passed after the extra isolated UI fixture was removed; no production/agent panes were replaced."
+    },
+    "go_vet": "passed",
+    "macos_build": "passed",
+    "linux_amd64_build": "passed (compile only)",
+    "docs": "108 local links/anchors and 46 shell blocks passed; EN/UK structure test passed",
+    "isolated_terminal": "Observed actual ANSI tmux draw of both colored headers and compact arrows/state/type in an 80-column terminal; fixture removed."
+  },
+  "live_pair": {
+    "request_id": "ebcaa4de30cd44f25e1c4ce988c79e44",
+    "request_state": "accepted",
+    "request_transport": "claude-channel",
+    "reply_id": "7dbe02682f25162cac4d2f6f85551af0",
+    "reply_to": "ebcaa4de30cd44f25e1c4ce988c79e44",
+    "reply_state_at_snapshot": "queued",
+    "reply_text": "UI_COMMUNICATION_OK: повідомлення отримано, ack виконано, обмін показано в розмові CLI.",
+    "reviewer_conversation": "A visible natural-language acknowledgement was observed in the Claude pane; no exact two-heading layout is inferred from its self-report.",
+    "applied": "Headers and rebuilt send receipt output applied to the existing pair. Only the background bridge was gracefully restarted after verifying its exact command and no sending records. Both agent panes remain alive."
+  },
+  "limits": [
+    "The existing Claude Channel process remains on its previous formatter until its next launch.",
+    "Exact model-written summaries depend on the native CLI and agent following the display instruction.",
+    "Worker tmux return delivery waits for its active output to settle; queued is not delivered.",
+    "GUI screenshot was unavailable because native app access was denied; actual isolated terminal output and protocol payloads were checked."
+  ]
+}

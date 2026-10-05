@@ -272,7 +272,7 @@ func TestQueueRejectsForgedHeadersAndBidiControls(t *testing.T) {
 
 func TestFormatMessageMarksBothEnds(t *testing.T) {
 	m := message{ID: strings.Repeat("ab", 16), From: "reviewer", To: "worker", Text: "APPROVED"}
-	want := "[2mux message " + m.ID + " from reviewer to worker]\nAPPROVED\n[2mux end of message " + m.ID + "]"
+	want := "╭─ 2mux · REVIEWER → WORKER\n│ MESSAGE\n╰──────────────────────────────────────\n[2mux message " + m.ID + " from reviewer to worker]\nAPPROVED\n[2mux end of message " + m.ID + "]"
 	if got := formatMessage(m); got != want {
 		t.Fatalf("got %q", got)
 	}

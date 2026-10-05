@@ -45,16 +45,28 @@ const (
 	statusSending   messageStatus = "sending"
 	statusDelivered messageStatus = "delivered"
 	statusUncertain messageStatus = "uncertain"
+	statusSubmitted messageStatus = "submitted"
+	statusAccepted  messageStatus = "accepted"
+	statusRejected  messageStatus = "rejected"
 )
 
 type message struct {
-	ID      string        `json:"id"`
-	From    string        `json:"from"`
-	To      string        `json:"to"`
-	Text    string        `json:"text"`
-	Created time.Time     `json:"created"`
-	Status  messageStatus `json:"status"`
-	Error   string        `json:"error,omitempty"`
+	ID          string        `json:"id"`
+	From        string        `json:"from"`
+	To          string        `json:"to"`
+	Text        string        `json:"text"`
+	Created     time.Time     `json:"created"`
+	Status      messageStatus `json:"status"`
+	Error       string        `json:"error,omitempty"`
+	Kind        string        `json:"kind,omitempty"`
+	ReplyTo     string        `json:"reply_to,omitempty"`
+	Verdict     string        `json:"verdict,omitempty"`
+	Scope       string        `json:"scope,omitempty"`
+	Transport   string        `json:"transport,omitempty"`
+	Attempt     int           `json:"attempt,omitempty"`
+	Steer       bool          `json:"steer,omitempty"`
+	SubmittedAt time.Time     `json:"submitted_at,omitempty"`
+	TurnRef     string        `json:"turn_ref,omitempty"`
 }
 
 func validRole(role string) bool { return role == roleWorker || role == roleReviewer }
@@ -80,8 +92,12 @@ func validateText(text string) error {
 	// A body line that looks like a 2mux header could impersonate another
 	// sender, such as the user, inside a single delivered message.
 	for _, line := range strings.Split(text, "\n") {
-		if strings.HasPrefix(strings.TrimLeft(line, " \t"), headerPrefix) {
+		line = strings.TrimLeft(line, " \t")
+		if strings.HasPrefix(line, headerPrefix) {
 			return errors.New("message lines must not start with " + headerPrefix)
+		}
+		if strings.HasPrefix(line, communicationPrefix) {
+			return errors.New("message lines must not start with " + communicationPrefix)
 		}
 	}
 	return nil
@@ -119,7 +135,7 @@ func writeJSON(path string, value any) error {
 	return os.Rename(f.Name(), path)
 }
 
-func enqueue(dir, from, to, text string) (message, error) {
+func enqueue(dir, from, to, text string, options ...sendOptions) (message, error) {
 	if !validSender(from) {
 		return message{}, fmt.Errorf("unknown sender %q; use user, worker or reviewer", from)
 	}
@@ -134,6 +150,17 @@ func enqueue(dir, from, to, text string) (message, error) {
 		return message{}, err
 	}
 	m := message{ID: id, From: from, To: to, Text: text, Created: time.Now().UTC(), Status: statusQueued}
+	if len(options) > 0 {
+		m.Kind, m.ReplyTo, m.Verdict, m.Steer = options[0].Kind, options[0].ReplyTo, options[0].Verdict, options[0].Steer
+	}
+	lock, err := waitLock(filepath.Join(dir, "queue.lock"), 5*time.Second, "message queue is busy")
+	if err != nil {
+		return message{}, err
+	}
+	defer lock.Close()
+	if err := validateConversation(dir, &m); err != nil {
+		return message{}, err
+	}
 	err = writeJSON(filepath.Join(dir, "messages", id+".json"), m)
 	return m, err
 }
@@ -195,9 +222,12 @@ func parseMessage(name string, data []byte) (message, error) {
 		return m, fmt.Errorf("invalid message %s: %w", name, err)
 	}
 	switch m.Status {
-	case statusQueued, statusSending, statusDelivered, statusUncertain:
+	case statusQueued, statusSending, statusDelivered, statusUncertain, statusSubmitted, statusAccepted, statusRejected:
 	default:
 		return m, fmt.Errorf("invalid message status in %s", name)
+	}
+	if err := validateMessageOptions(m); err != nil {
+		return m, fmt.Errorf("invalid message metadata %s: %w", name, err)
 	}
 	return m, nil
 }
@@ -215,6 +245,10 @@ func sortMessages(messages []message) {
 // checked before a record is marked sending, so a recipient that cannot
 // receive does not cause repeated record writes on every bridge tick.
 func deliverQueue(dir string, ready, deliver func(message) error) error {
+	return deliverQueueTransport(dir, ready, deliver, nil)
+}
+
+func deliverQueueTransport(dir string, ready, deliver func(message) error, choose func(message) (string, error), owners ...func(message) bool) error {
 	lock, ok, err := tryLock(filepath.Join(dir, "queue.lock"))
 	if err != nil || !ok {
 		return err
@@ -228,6 +262,9 @@ func deliverQueue(dir string, ready, deliver func(message) error) error {
 	blocked := map[string]bool{}
 	attempts := 0
 	for _, m := range messages {
+		if len(owners) > 0 && !owners[0](m) {
+			continue
+		}
 		path := filepath.Join(dir, "messages", m.ID+".json")
 		if m.Status == statusSending {
 			// A previous process could have submitted before it crashed.
@@ -248,6 +285,21 @@ func deliverQueue(dir string, ready, deliver func(message) error) error {
 			break
 		}
 		attempts++
+		if choose != nil && m.Transport == "" {
+			if m.Attempt > 0 {
+				m.Transport = "tmux"
+			} else {
+				transport, err := choose(m)
+				if err != nil {
+					blocked[m.To], lastError = true, err
+					continue
+				}
+				m.Transport = transport
+			}
+			if err := writeJSON(path, m); err != nil {
+				return err
+			}
+		}
 		if ready != nil {
 			if err := ready(m); err != nil {
 				blocked[m.To], lastError = true, err
@@ -260,17 +312,36 @@ func deliverQueue(dir string, ready, deliver func(message) error) error {
 				continue
 			}
 		}
+		if m.Kind == "verdict" {
+			if err := validateVerdictScope(dir, m); err != nil {
+				lastError = err
+				m.Status, m.Error = statusRejected, err.Error()
+				if err := writeJSON(path, m); err != nil {
+					return err
+				}
+				continue
+			}
+		}
 		m.Status, m.Error = statusSending, ""
+		m.Attempt++
 		if err := writeJSON(path, m); err != nil {
 			return err
 		}
 		err := deliver(m)
 		m.Status = statusDelivered
+		if m.Transport != "" && m.Transport != "tmux" {
+			m.Status = statusSubmitted
+			m.SubmittedAt = time.Now().UTC()
+		}
 		if err != nil {
 			m.Status, m.Error = statusQueued, err.Error()
 			var uncertain uncertainDelivery
 			if errors.As(err, &uncertain) {
 				m.Status = statusUncertain
+			}
+			var rejected rejectedDelivery
+			if errors.As(err, &rejected) {
+				m.Status = statusRejected
 			}
 			blocked[m.To], lastError = true, err
 		}
@@ -284,7 +355,7 @@ func deliverQueue(dir string, ready, deliver func(message) error) error {
 // The closing marker contains the random ID, which a sender cannot know when
 // writing the body, so the receiving agent can see where peer text ends.
 func formatMessage(m message) string {
-	return fmt.Sprintf("%s message %s from %s to %s]\n%s\n%s end of message %s]", headerPrefix, m.ID, m.From, m.To, m.Text, headerPrefix, m.ID)
+	return communicationHeading(m, "") + fmt.Sprintf("%s message %s from %s to %s]\n%s\n%s end of message %s]", headerPrefix, m.ID, m.From, m.To, m.Text, headerPrefix, m.ID)
 }
 
 // archiveDelivered moves old delivered records out of the scanned directory,
@@ -301,7 +372,7 @@ func archiveDelivered(dir string, olderThan time.Duration) error {
 	}
 	archive := filepath.Join(dir, "messages", "archive")
 	for _, m := range messages {
-		if m.Status != statusDelivered || time.Since(m.Created) < olderThan {
+		if (m.Status != statusDelivered && m.Status != statusAccepted) || m.Kind != "" || m.ReplyTo != "" || time.Since(m.Created) < olderThan {
 			continue
 		}
 		if err := os.Mkdir(archive, 0700); err != nil && !os.IsExist(err) {

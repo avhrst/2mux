@@ -4,15 +4,15 @@
 
 ## Components
 
-2mux is a Go executable using the standard library, tmux and `ps`. It launches installed agent CLIs, persists messages locally and submits them to their terminals. Models and account configuration remain with the agent CLIs.
+2mux is a Go executable using tmux and `ps`; its optional Codex API transport adds the `github.com/coder/websocket` dependency. It launches installed agent CLIs, persists messages locally and submits them through the transport selected for each role. Models and account configuration remain with the agent CLIs.
 
 ```mermaid
 flowchart LR
     W[Codex WORKER] -->|2mux send| Q[Private JSON queue]
-    R[Claude Code REVIEWER] -->|2mux send| Q
+    R[Claude Code REVIEWER] -->|2mux send or Channel reply| Q
     Q --> B[Background bridge]
-    B -->|tmux paste and Enter| W
-    B -->|tmux paste and Enter| R
+    B -->|tmux or Codex API| W
+    B -->|tmux or Claude Channel| R
 ```
 
 Both panes share one project working tree and Unix account. The generated reviewer instructions request inspection without editing, and the reviewer launch denies Claude Code's `Edit`, `Write` and `NotebookEdit` tools; shell commands remain subject to Claude Code's permissions, so this does not enforce read-only access. Message sender labels likewise do not authenticate the caller.
@@ -24,8 +24,16 @@ Both panes share one project working tree and Unix account. The generated review
 | [queue.go](../queue.go) | Message validation, IDs, atomic JSON records, ordering, state transitions and explicit resolution. |
 | [bridge.go](../bridge.go) | Background process, locks, health and the delivery loop. |
 | [pane.go](../pane.go) | Pane readiness: foreground-agent detection, quiet-screen and dialog checks, paste and submit. |
+| [conversation.go](../conversation.go) | Typed request/verdict correlation, exact reply IDs, duplicate-verdict checks and Git scope validation across all transports. |
+| [transport.go](../transport.go), [codexrpc.go](../codexrpc.go) | Private Codex backend lifecycle, thread identity, WebSocket RPC and native queue submission. |
+| [channel.go](../channel.go) | Claude MCP Channel delivery, exact-ID `ack` and correlated `reply`. |
+| [state.go](../state.go), [events.go](../events.go), [status.go](../status.go), [codexstate.go](../codexstate.go) | Session config, reduced role state, hook/native events, legacy Codex TUI observation, JSON status and watch output. |
+| [reconcile.go](../reconcile.go) | Reconcile attempted native deliveries using exact receipt evidence without automatic replay. |
+| [presentation.go](../presentation.go) | Incoming role cards, compact send/ack/reply receipts, conversation-display instructions and read-only tmux pane header jobs. |
 | [version.go](../version.go) | Build version, defaulting to `dev`. |
 | [testdata/agent/main.go](../testdata/agent/main.go) | Deterministic local TUI fixture for integration tests. |
+
+Presentation preserves the full body and the existing exact-ID protocol boundaries; only tool receipt previews are shortened. Human role cards precede protocol metadata so collapsed native notification previews show the sender and direction first. The `_badge` format job reads validated queue records and outputs only fixed role/type/state labels, with a compact variant for narrow panes. Message text is never interpolated into tmux styles or shell commands. `start` and `respawn` apply the headers to registered role panes; unrelated panes retain their titles. The [tmux manual](https://man.openbsd.org/tmux.1#FORMATS) documents the asynchronous format jobs and [pane border formats](https://man.openbsd.org/tmux.1#pane-border-format).
 
 ## Session identity and lifecycle
 
@@ -60,7 +68,7 @@ The runtime directory is created with `os.MkdirTemp`, with mode `0700`. The CLI 
 | `queue.lock` | Serialize delivery batches, archiving and operator resolution. |
 | `messages/archive/` | Delivered records older than 24 hours, moved out of the scanned directory. |
 
-Locks use nonblocking Unix `flock` and are released by the kernel when the file descriptor closes or the process dies. Enqueue writes are independent: each gets a random 128-bit ID. JSON writes use a same-directory temporary file, file sync, close and rename, so readers see complete records. This does not promise survival after loss or clearing of temporary storage.
+Locks use nonblocking Unix `flock` and are released by the kernel when the file descriptor closes or the process dies. Enqueue and delivery share the queue lock so reference and duplicate-verdict validation is atomic; each message gets a random 128-bit ID. JSON writes use a same-directory temporary file, file sync, close and rename, so readers see complete records. This does not promise survival after loss or clearing of temporary storage.
 
 A message record contains `id`, `from`, `to`, `text`, `created`, `status` and optional `error`. `created` uses UTC. Reading validates IDs, filenames, senders (`user`, `worker`, `reviewer`), recipients, nonzero creation times, text and known states, then sorts by creation time and ID as a tie-breaker. A corrupt record stops delivery rather than being silently skipped; `status` and `messages` still show the valid records and name the corrupt files. Sender validation protects the terminal header from injected control characters, and rejecting body lines that start with `[2mux` prevents a body from imitating a second header. Delivered text ends with `[2mux end of message ID]`; the random ID is unknown to the sender when it writes the body.
 
@@ -122,3 +130,32 @@ GOOS=linux GOARCH=amd64 go build -o /tmp/2mux-linux-amd64 .
 Cross-building does not test Linux runtime behavior. The module declares Go 1.22; testing with a newer compiler does not independently establish compatibility with that minimum toolchain.
 
 When changing CLI behavior, update help in `main.go`, the root READMEs and both language versions of affected docs; `docs_test.go` fails if their structure diverges. Keep documented syntax, state semantics and recovery actions aligned with the implementation, and run the relevant transport tests when changing delivery or session handling.
+
+## Native transports and structured receipts
+
+`codexrpc.go` uses `github.com/coder/websocket` v1.8.12 (ISC, pure Go) for HTTP Upgrade over a private Unix socket. Unix transport is WebSocket, not JSONL. Replies are multiplexed by ID, foreign-thread events and model text deltas are ignored, and event-buffer overflow forces reconnection rather than silently losing state. Server approval/user-input requests are observed but never answered. The native TUI owns decisions. `transport.go` owns backend setup, thread identity and server-queue submission.
+
+`channel.go` is an MCP JSON-lines stdio server advertising only `claude/channel` and tools, using protocol revision `2025-03-26`. Its `ack` confirms one exact receipt; `reply` enqueues a precisely correlated note or review verdict. It never advertises `claude/channel/permission`. Session-specific `mcp.json` and `claude-settings.json` stay in the private runtime directory; no global settings or project MCP config is rewritten. Channel process health proves MCP connectivity only.
+
+`state.go`, `events.go` and `status.go` store reduced role state, never hook prompt/tool payloads or transcript paths. States are `unknown`, `starting`, `idle`, `busy`, `awaiting_approval`, `awaiting_input`, `exited`. SessionStart starts in `starting`; Stop/idle notifications establish idle. Missing observers make reported state unknown. A turn's completion is state evidence, never a business verdict.
+
+Without `--codex-api`, `codexstate.go` observes the registered WORKER pane once per second. It verifies a foreground Codex process and recognizes explicit TUI working controls, an idle prompt/footer, and supported approval dialogs; JSON reports `source: "codex-tui"`. This is a display heuristic, not native event evidence. Unrecognized screens, copy mode, disabled input, probe errors and a stopped/stale bridge report `unknown`; a missing/dead pane reports `exited` while the bridge is healthy. Captured text is never stored, and this observer does not change delivery readiness or answer dialogs.
+
+Native message records add `transport`, `attempt`, `kind`, `reply_to`, `verdict`, `scope`, `steer`, `turn_ref`, `submitted_at`. The chosen transport is persisted before the attempt. Successful native submission becomes `submitted`; exact user-item/explicit ack evidence becomes `accepted`. Legacy `delivered` records remain readable. `reconcile.go` inspects Codex queue/item pages after reconnect and marks missing receipts uncertain; Channel restart marks unacknowledged submissions uncertain. No automatic transport switch or replay is allowed after any attempt. An explicit operator retry retains the chosen transport. Typed review records remain active so exact references and duplicate-verdict checks remain possible.
+
+```mermaid
+stateDiagram-v2
+    queued --> sending: persist transport and attempt
+    sending --> submitted: native write acknowledged
+    submitted --> accepted: exact user item or explicit ack
+    sending --> uncertain: interrupted or ambiguous write
+    submitted --> uncertain: reconnect finds no proof
+    uncertain --> accepted: exact receipt discovered
+    uncertain --> queued: explicit operator retry, same transport
+```
+
+The app-server backend has its own pane in the session's `2mux-api` window and a Unix socket in the runtime directory (`0700`, observed socket `0600`). Its pane/thread IDs and the Claude session UUID are persisted in `session.json`. Starting a second backend while its registered pane is alive is rejected. Agent respawn resumes the saved session. Runtime cleanup is controlled by the existing tmux session lifecycle; no shared daemon is terminated.
+
+Additional tests cover out-of-order RPC replies, connection loss, approval non-response, thread filtering, exact receipt IDs, Channel handshake/ack/reply, crash reconciliation, fixed transports, stale Git scopes, foreign hooks and hook payload privacy. Run `TWOMUX_PROTOCOL_SMOKE=1 go test -v -run TestNativeCodexProtocol` for a real isolated Codex socket/thread/queue probe, without requesting inference. The [evidence record](../validation/native-communication-20261005.json) distinguishes this probe from unverified real-TUI/policy gates. Native CLI versions are conservatively pinned until revalidated. Codex 0.160.0 schema and isolated WebSocket/queue/restart checks are recorded in the [new protocol evidence](../validation/codex-0160-native-20261005.json); these checks do not prove native TUI inference or multi-client approval routing. Explicit native requests fail on unsupported versions before a new session is created and never downgrade to tmux. Status snapshots include the configured transport of each role.
+
+Protocol sources: [Codex app-server](https://learn.chatgpt.com/docs/app-server), [Claude Channels](https://code.claude.com/docs/en/channels-reference), [Claude hooks](https://code.claude.com/docs/en/hooks).

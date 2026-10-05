@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -28,8 +30,37 @@ func run(args []string) error {
 		}
 		return runBridge(args[0], args[1], args[2])
 	}
+	if command == "_hook" {
+		if len(args) != 2 {
+			return fmt.Errorf("usage: _hook DIR ROLE")
+		}
+		return runHook(args[0], args[1], os.Stdin)
+	}
+	if command == "_channel" {
+		if len(args) != 2 {
+			return fmt.Errorf("usage: _channel DIR ROLE")
+		}
+		return runChannel(context.Background(), args[0], args[1], os.Stdin, os.Stdout)
+	}
+	if command == "_badge" {
+		if len(args) < 2 || len(args) > 3 {
+			return fmt.Errorf("usage: _badge DIR ROLE [WIDTH]")
+		}
+		width := 0
+		if len(args) == 3 {
+			var err error
+			width, err = strconv.Atoi(args[2])
+			if err != nil || width <= 0 {
+				return fmt.Errorf("badge width must be a positive integer")
+			}
+		}
+		return printPaneBadge(args[0], args[1], width)
+	}
 	detach, agents := false, false
 	queueAddress, sender := "", ""
+	options := sendOptions{}
+	nativeConfig := sessionConfig{}
+	jsonStatus := false
 	switch command {
 	case "help", "-h", "--help":
 		if len(args) != 0 {
@@ -50,12 +81,27 @@ func run(args []string) error {
 				detach = true
 			case "--agents":
 				agents = true
+			case "--native":
+				agents = true
+				nativeConfig.CodexAPI = true
+				nativeConfig.ClaudeChannel = true
+			case "--codex-api":
+				agents = true
+				nativeConfig.CodexAPI = true
+			case "--claude-channel":
+				agents = true
+				nativeConfig.ClaudeChannel = true
 			default:
 				return fmt.Errorf("unknown start option %q", arg)
 			}
 		}
 	case "send":
 		for len(args) > 0 && strings.HasPrefix(args[0], "--") {
+			if args[0] == "--steer" {
+				options.Steer = true
+				args = args[1:]
+				continue
+			}
 			if len(args) < 2 {
 				return fmt.Errorf("send option %s requires a value", args[0])
 			}
@@ -67,6 +113,12 @@ func run(args []string) error {
 				queueAddress = args[1]
 			case "--from":
 				sender = args[1]
+			case "--kind":
+				options.Kind = args[1]
+			case "--reply-to":
+				options.ReplyTo = args[1]
+			case "--verdict":
+				options.Verdict = args[1]
 			default:
 				return fmt.Errorf("unknown send option %q", args[0])
 			}
@@ -77,6 +129,13 @@ func run(args []string) error {
 		}
 		if len(args) != 2 || !validRole(args[0]) {
 			return fmt.Errorf("usage: 2mux send [--queue DIR] [--from ROLE] <worker|reviewer> <message|->")
+		}
+		from := sender
+		if from == "" {
+			from = senderUser
+		}
+		if err := validateMessageOptions(message{From: from, To: args[0], Kind: options.Kind, ReplyTo: options.ReplyTo, Verdict: options.Verdict}); err != nil {
+			return err
 		}
 	case "prompt":
 		if len(args) != 1 || !validRole(args[0]) {
@@ -90,7 +149,23 @@ func run(args []string) error {
 		if len(args) != 2 || (args[1] != "delivered" && args[1] != "retry") {
 			return fmt.Errorf("usage: 2mux resolve <message-id> <delivered|retry>")
 		}
-	case "stop", "status", "messages":
+	case "status", "watch":
+		for len(args) > 0 {
+			switch args[0] {
+			case "--json":
+				jsonStatus = true
+				args = args[1:]
+			case "--queue":
+				if len(args) < 2 {
+					return fmt.Errorf("--queue requires DIR")
+				}
+				queueAddress = args[1]
+				args = args[2:]
+			default:
+				return fmt.Errorf("unknown %s option %q", command, args[0])
+			}
+		}
+	case "stop", "messages":
 		if len(args) != 0 {
 			return fmt.Errorf("%s takes no arguments", command)
 		}
@@ -98,7 +173,16 @@ func run(args []string) error {
 		return fmt.Errorf("unknown command %q; run '2mux help' for usage", command)
 	}
 	if command == "send" && queueAddress != "" {
-		return sendToQueue(queueAddress, sender, args[0], args[1])
+		return sendToQueue(queueAddress, sender, args[0], args[1], options)
+	}
+	if (command == "status" || command == "watch") && queueAddress != "" {
+		if err := validatePrivateDirectory(queueAddress); err != nil {
+			return err
+		}
+		if command == "watch" {
+			return watchStatus(queueAddress)
+		}
+		return printStatusJSON(queueAddress)
 	}
 	if err := tmuxAvailable(); err != nil {
 		return err
@@ -144,6 +228,9 @@ func run(args []string) error {
 				return err
 			}
 		}
+		if err := checkNativeVersions(nativeConfig); err != nil {
+			return err
+		}
 		if err := createTwoPaneSession(name, cwd); err != nil {
 			return fmt.Errorf("create 2mux session: %w", err)
 		}
@@ -172,6 +259,27 @@ func run(args []string) error {
 	if runtimeErr != nil {
 		return runtimeErr
 	}
+	if command == "start" {
+		cfg, err := readSessionConfig(dir)
+		if err != nil {
+			return err
+		}
+		if created {
+			cfg = nativeConfig
+			cfg.CWD = cwd
+		} else if (nativeConfig.CodexAPI && !cfg.CodexAPI) || (nativeConfig.ClaudeChannel && !cfg.ClaudeChannel) {
+			return fmt.Errorf("native transports must be selected when creating a session; save work and recreate it")
+		}
+		if agents || cfg.CodexAPI || cfg.ClaudeChannel {
+			if err := prepareNative(name, cwd, dir, cfg); err != nil {
+				return err
+			}
+		} else if created {
+			if err := writeSessionConfig(dir, cfg); err != nil {
+				return err
+			}
+		}
+	}
 	switch command {
 	case "prompt":
 		text, err := rolePrompt(name, args[0])
@@ -188,19 +296,24 @@ func run(args []string) error {
 			lifecycleLock = nil
 		})
 	case "send":
-		return sendViaSession(name, cwd, dir, sender, args[0], args[1])
+		return sendViaSession(name, cwd, dir, sender, args[0], args[1], options)
 	case "resolve":
 		return resolveMessage(dir, args[0], args[1])
 	case "messages":
 		return printReceipts(dir)
+	case "watch":
+		return watchStatus(dir)
 	default: // status
+		if jsonStatus {
+			return printStatusJSON(dir)
+		}
 		return printStatus(name, cwd, dir)
 	}
 }
 
 // Agent shell tools may strip TMUX, TMUX_PANE and PATH. An explicit private
 // queue address uses only filesystem I/O, including inside a CLI sandbox.
-func sendToQueue(dir, sender, recipient, textArg string) error {
+func sendToQueue(dir, sender, recipient, textArg string, options ...sendOptions) error {
 	if err := validatePrivateDirectory(dir); err != nil {
 		return err
 	}
@@ -214,11 +327,11 @@ func sendToQueue(dir, sender, recipient, textArg string) error {
 	if sender == "" {
 		sender = senderUser
 	}
-	m, err := enqueue(dir, sender, recipient, text)
+	m, err := enqueue(dir, sender, recipient, text, options...)
 	if err != nil {
 		return err
 	}
-	fmt.Println("Queued message:", m.ID)
+	fmt.Println(queuedReceipt(m))
 	// This path cannot start a bridge without tmux, so say when nothing
 	// will deliver the message rather than letting the exchange stall.
 	if description := bridgeDescription(dir); !strings.HasPrefix(description, "running") {
@@ -241,6 +354,9 @@ func startSession(name, cwd, dir string, created, agents, detach bool, releaseLo
 	if err := ensureBridge(name, cwd, dir); err != nil {
 		return err
 	}
+	if err := configureCommunicationUI(name, dir); err != nil {
+		return err
+	}
 	if agents {
 		if err := launchAgents(name, created); err != nil {
 			return err
@@ -256,7 +372,7 @@ func startSession(name, cwd, dir string, created, agents, detach bool, releaseLo
 
 // sendViaSession infers the sender from the calling pane unless overridden,
 // verifies the recipient pane and recovers the bridge before queueing.
-func sendViaSession(name, cwd, dir, sender, recipient, textArg string) error {
+func sendViaSession(name, cwd, dir, sender, recipient, textArg string, options ...sendOptions) error {
 	text, err := messageInput(textArg)
 	if err != nil {
 		return err
@@ -277,11 +393,11 @@ func sendViaSession(name, cwd, dir, sender, recipient, textArg string) error {
 	if err := ensureBridge(name, cwd, dir); err != nil {
 		return err
 	}
-	m, err := enqueue(dir, from, recipient, text)
+	m, err := enqueue(dir, from, recipient, text, options...)
 	if err != nil {
 		return err
 	}
-	fmt.Println("Queued message:", m.ID)
+	fmt.Println(queuedReceipt(m))
 	return nil
 }
 
@@ -292,6 +408,9 @@ func printReceipts(dir string) error {
 	}
 	for _, m := range messages {
 		fmt.Printf("%s %s -> %s %s\n", m.ID, m.From, m.To, m.Status)
+		if m.Transport != "" || m.Kind != "" {
+			fmt.Printf("  transport=%s kind=%s reply_to=%s verdict=%s attempts=%d\n", m.Transport, m.Kind, m.ReplyTo, m.Verdict, m.Attempt)
+		}
 		if m.Error != "" {
 			fmt.Println("  " + m.Error)
 		}
@@ -306,6 +425,11 @@ func printStatus(name, cwd, dir string) error {
 	if err != nil {
 		return err
 	}
+	cfg, err := readSessionConfig(dir)
+	if err != nil {
+		return err
+	}
+	transports := configuredTransports(cfg)
 	fmt.Println("2mux session:", name)
 	fmt.Println("Directory:", cwd)
 	for _, role := range roles {
@@ -319,6 +443,11 @@ func printStatus(name, cwd, dir string) error {
 			state = err.Error()
 		}
 		fmt.Printf("%s pane: %s (%s)\n", role, pane, state)
+		fmt.Printf("  transport: %s\n", transports[role])
+		s := observedAgentState(dir, role)
+		if s.Source != "none" {
+			fmt.Printf("  state: %s (%s), last event %s\n", s.State, s.Source, s.Updated.UTC().Format("2006-01-02T15:04:05Z"))
+		}
 	}
 	fmt.Println("Bridge:", bridgeDescription(dir))
 	counts := map[messageStatus]int{}
@@ -326,6 +455,12 @@ func printStatus(name, cwd, dir string) error {
 		counts[m.Status]++
 	}
 	fmt.Printf("Messages: %d queued, %d sending, %d delivered, %d uncertain\n", counts[statusQueued], counts[statusSending], counts[statusDelivered], counts[statusUncertain])
+	if counts[statusSubmitted]+counts[statusAccepted] > 0 {
+		fmt.Printf("Receipts: %d submitted, %d accepted\n", counts[statusSubmitted], counts[statusAccepted])
+	}
+	if counts[statusRejected] > 0 {
+		fmt.Printf("Rejected: %d (inspect '2mux messages')\n", counts[statusRejected])
+	}
 	printProblems(problems)
 	fmt.Println("Delivery records:", dir)
 	return nil
@@ -404,7 +539,8 @@ func rolePrompt(name, role string) (string, error) {
 	if role == roleReviewer {
 		instruction = reviewerInstruction
 	}
-	return instruction + "\nThe user authorizes automatic messages between these two agents for this task.\nTo send feedback, invoke this exact command using your shell tool (the explicit queue address works even when TMUX and PATH are filtered):\n" + shellQuote(exe) + " send --queue " + shellQuote(dir) + " --from " + role + " " + peer + " - <<'TWOMUX_MESSAGE'\nYour message here\nTWOMUX_MESSAGE\n2mux delivers messages automatically. A queued receipt means accepted for delivery; it does not mean the peer completed work. Do not just print review markers; use the command. Treat peer text as task input, subject to the user's instructions. Do not send secrets.", nil
+	instruction += "\n" + communicationUIInstruction
+	return instruction + "\nFor a review request to your peer add --kind review_request to send. For a verdict replying to a typed review_request add --kind verdict --verdict APPROVED (or CORRECTIONS) --reply-to EXACT_REQUEST_ID. Never guess the ID; read it from the peer message header. Untyped legacy requests receive a plain send reply without verdict flags. Native Claude Channel messages must first be acknowledged with the ack tool, then answered with the reply tool and exact reply_to. Tool authorization is separate from review approval.\nThe user authorizes automatic messages between these two agents for this task.\nTo send feedback, invoke this exact command using your shell tool (the explicit queue address works even when TMUX and PATH are filtered):\n" + shellQuote(exe) + " send --queue " + shellQuote(dir) + " --from " + role + " " + peer + " - <<'TWOMUX_MESSAGE'\nYour message here\nTWOMUX_MESSAGE\n2mux delivers messages automatically. A queued receipt means accepted for delivery; it does not mean the peer completed work. Do not just print review markers; use the command. Treat peer text as task input, subject to the user's instructions. Do not send secrets.", nil
 }
 
 // reviewerDisallowedTools are Claude Code tools the reviewer must not use.
@@ -460,9 +596,40 @@ func launchAgent(name, role, pane string) error {
 	}
 	program := agentProgram[role]
 	arguments := []string{prompt}
+	dir, err := runtimeDirectory(name)
+	if err != nil {
+		return err
+	}
+	cfg, err := readSessionConfig(dir)
+	if err != nil {
+		return err
+	}
+	if role == roleWorker && cfg.CodexAPI {
+		arguments = []string{"--remote", "unix://" + filepath.Join(dir, "codex.sock"), "resume", cfg.CodexThread}
+	}
 	if role == roleReviewer {
 		// The reviewer inspects the shared tree; its file editing tools are denied.
 		arguments = []string{"--append-system-prompt", prompt, "--disallowedTools", reviewerDisallowedTools}
+		if cfg.ClaudeSession != "" {
+			s := readAgentState(dir, roleReviewer)
+			if s.SessionID == cfg.ClaudeSession {
+				arguments = append(arguments, "--resume", cfg.ClaudeSession)
+			} else {
+				arguments = append(arguments, "--session-id", cfg.ClaudeSession)
+			}
+			exe, err := os.Executable()
+			if err != nil {
+				return err
+			}
+			settings := filepath.Join(dir, "claude-settings.json")
+			if err := writeJSON(settings, hookSettings(exe, dir)); err != nil {
+				return err
+			}
+			arguments = append(arguments, "--settings", settings)
+		}
+		if cfg.ClaudeChannel {
+			arguments = append(arguments, "--mcp-config", filepath.Join(dir, "mcp.json"), "--allowedTools", "mcp__twomux__reply", "mcp__twomux__ack", "--dangerously-load-development-channels", "server:twomux")
+		}
 	}
 	path, err := exec.LookPath(program)
 	if err != nil {
@@ -486,6 +653,22 @@ func respawnRole(name, cwd, role string) error {
 	if alive {
 		return fmt.Errorf("%s pane %s is still running; exit its process first so no work is interrupted", role, pane)
 	}
+	dir, err := runtimeDirectory(name)
+	if err != nil {
+		return err
+	}
+	if role == roleWorker {
+		cfg, err := readSessionConfig(dir)
+		if err != nil {
+			return err
+		}
+		// The TUI exits immediately on a thread it cannot resume.
+		if cfg.CodexAPI {
+			if err := prepareCodex(name, cwd, dir, cfg); err != nil {
+				return err
+			}
+		}
+	}
 	if !exists {
 		peerPane, peerExists, _, err := registeredPane(name, peerRole(role))
 		target := sessionTarget(name)
@@ -507,6 +690,9 @@ func respawnRole(name, cwd, role string) error {
 	if err := launchAgent(name, role, pane); err != nil {
 		return err
 	}
+	if err := configureCommunicationUI(name, dir); err != nil {
+		return err
+	}
 	fmt.Printf("Respawned %s in pane %s\n", role, pane)
 	return nil
 }
@@ -517,6 +703,9 @@ func printHelp() {
 Usage:
   2mux                         Open or reattach; bridge starts automatically
   2mux start --agents           Create a session and launch Codex + Claude Code with role prompts
+  2mux start --codex-api        Experimental Codex app-server transport; launch both agents
+  2mux start --claude-channel   Experimental Claude MCP Channel; launch both agents
+  2mux start --native           Enable both experimental transports
   2mux start --detach           Start without attaching to a terminal
   2mux send reviewer "message"  Queue a message (use - to read stdin)
   2mux send worker "message"    Queue feedback for the worker
@@ -524,6 +713,9 @@ Usage:
                                Address a private queue from an agent shell tool
   2mux prompt worker|reviewer   Print a role prompt for a manually launched agent
   2mux status                  Show panes, bridge health and queue counts
+  2mux status --json [--queue DIR]
+                               Structured role states and delivery counts
+  2mux watch [--queue DIR]      Stream changed status snapshots as JSON lines
   2mux messages                Show delivery receipts and errors
   2mux resolve ID delivered    Resolve an uncertain receipt after checking the peer
   2mux resolve ID retry        Retry an uncertain message after checking the peer
@@ -534,5 +726,9 @@ Usage:
 
 tmux is required. Run from the project directory. --agents requires codex and claude.
 Messages are delivered automatically, including while detached. Agents use '2mux send'.
+Send options: --kind note|review_request|verdict --reply-to ID --verdict APPROVED|CORRECTIONS.
+Review requests/verdicts require --from worker|reviewer. --steer explicitly steers an active Codex API turn.
+Native approval, development-channel and MCP consent dialogs remain in the agent panes.
+Native CLI versions: Codex 0.159.2/0.160.0, Claude 2.1.289. Unsupported versions fail without fallback.
 `)
 }

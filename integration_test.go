@@ -187,6 +187,138 @@ func setupIntegration(t *testing.T) *integration {
 	return e
 }
 
+func (e *integration) stopPaneProcess(t *testing.T, pane string) {
+	t.Helper()
+	value, err := tmux("display-message", "-p", "-t", pane, "#{pane_pid}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	e.waitFor(t, "pane process exited", func() bool {
+		dead, err := tmux("display-message", "-p", "-t", pane, "#{pane_dead}")
+		return err == nil && dead == "1"
+	})
+}
+
+func TestNativeCodexFirstLaunchAndRestart(t *testing.T) {
+	if os.Getenv("TWOMUX_INTEGRATION") != "1" {
+		t.Skip("set TWOMUX_INTEGRATION=1 for native thread lifecycle integration")
+	}
+	e := setupIntegration(t)
+	e.mustCLI(t, "start", "--codex-api", "--detach")
+	var err error
+	e.runtime, err = runtimeDirectory(e.name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitWorker := func() {
+		t.Helper()
+		e.waitFor(t, "native worker resumed", func() bool {
+			_, err := os.Stat(filepath.Join(e.dir, "worker.ready"))
+			return err == nil
+		})
+	}
+	config := func() sessionConfig {
+		t.Helper()
+		cfg, err := readSessionConfig(e.runtime)
+		if err != nil || cfg.CodexThread == "" {
+			t.Fatalf("no saved native thread: %+v: %v", cfg, err)
+		}
+		return cfg
+	}
+	killWorker := func() {
+		t.Helper()
+		e.stopPaneProcess(t, e.pane(t, roleWorker))
+		if err := os.Remove(filepath.Join(e.dir, "worker.ready")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	waitWorker()
+	first := config()
+	stored, err := os.ReadFile(filepath.Join(e.dir, "thread-"+first.CodexThread+".json"))
+	if err != nil || !strings.Contains(string(stored), `"turns":[]`) {
+		t.Fatalf("bootstrap did not persist an empty thread: %s: %v", stored, err)
+	}
+	// The fixture must reproduce the original failure, not let thread/start
+	// alone survive a closed creating connection.
+	ctx, cancel := rpcTimeout()
+	r, err := dialCodex(ctx, filepath.Join(e.runtime, "codex.sock"))
+	if err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	var unsaved struct{ Thread codexThread }
+	err = r.call(ctx, "thread/start", map[string]any{"cwd": e.project}, &unsaved)
+	r.close()
+	cancel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.waitFor(t, "fixture discards unpersisted thread", func() bool {
+		ctx, cancel := rpcTimeout()
+		defer cancel()
+		r, err := dialCodex(ctx, filepath.Join(e.runtime, "codex.sock"))
+		if err != nil {
+			return false
+		}
+		defer r.close()
+		return missingRollout(r.call(ctx, "thread/resume", map[string]string{"threadId": unsaved.Thread.ID}, nil))
+	})
+	// Restart both worker and backend before the first turn. The thread ID
+	// must stay the same, proving durable persistence rather than a live owner.
+	killWorker()
+	e.stopPaneProcess(t, first.BackendPane)
+	e.mustCLI(t, "respawn", roleWorker)
+	waitWorker()
+	after := config()
+	if after.CodexThread != first.CodexThread || after.BackendPane == first.BackendPane {
+		t.Fatalf("empty thread was replaced or backend not restarted: %+v -> %+v", first, after)
+	}
+	// Stop the background bridge so the test owns missing-rollout recovery.
+	if err := stopBridge(e.runtime); err != nil {
+		t.Fatal(err)
+	}
+	m := queued(t, e.runtime, roleWorker, "unresolved old thread receipt")
+	m.Transport, m.Status, m.Attempt = "codex", statusSubmitted, 1
+	if err := writeJSON(filepath.Join(e.runtime, "messages", m.ID+".json"), m); err != nil {
+		t.Fatal(err)
+	}
+	after.CodexThread = "missing-bridge-rollout"
+	if err := writeSessionConfig(e.runtime, after); err != nil {
+		t.Fatal(err)
+	}
+	transport := &nativeTransport{dir: e.runtime, cfg: after}
+	if err := transport.connect(); err != nil {
+		t.Fatal(err)
+	}
+	transport.close()
+	recovered := config()
+	if recovered.CodexThread == after.CodexThread || recovered.CWD != after.CWD || recovered.ClaudeSession != after.ClaudeSession || recovered.BackendPane != after.BackendPane {
+		t.Fatalf("bridge did not save scoped replacement: %+v", recovered)
+	}
+	messages := e.messages()
+	if len(messages) != 1 || messages[0].Status != statusUncertain || messages[0].Attempt != 1 {
+		t.Fatalf("lost-thread receipt replayed or misreported: %+v", messages)
+	}
+	// The bootstrap path also repairs stale saved IDs before launching a TUI.
+	killWorker()
+	recovered.CodexThread = "missing-bootstrap-rollout"
+	if err := writeSessionConfig(e.runtime, recovered); err != nil {
+		t.Fatal(err)
+	}
+	e.mustCLI(t, "respawn", roleWorker)
+	waitWorker()
+	if got := config(); got.CodexThread == recovered.CodexThread {
+		t.Fatal("bootstrap kept the missing rollout ID")
+	}
+}
+
 func TestTmuxAutomaticReviewCycle(t *testing.T) {
 	if os.Getenv("TWOMUX_INTEGRATION") != "1" {
 		t.Skip("set TWOMUX_INTEGRATION=1 to run the isolated tmux integration test")
@@ -340,6 +472,16 @@ func TestTmuxAutomaticReviewCycle(t *testing.T) {
 				return w == nil && r == nil
 			})
 			worker, reviewer := e.pane(t, "worker"), e.pane(t, "reviewer")
+			for role, pane := range map[string]string{roleWorker: worker, roleReviewer: reviewer} {
+				label, err := tmux("show-option", "-p", "-v", "-t", pane, "@twomux_role")
+				if err != nil || label != role {
+					t.Fatalf("wrong role in pane header: %q: %v", label, err)
+				}
+				prompt := e.mustCLI(t, "prompt", role)
+				if !strings.Contains(prompt, communicationUIInstruction) {
+					t.Fatal("role prompt does not make peer communication visible")
+				}
+			}
 			// Move roles and change the active window before any delivery.
 			if _, err := tmux("swap-pane", "-s", worker, "-t", reviewer); err != nil {
 				t.Fatal(err)
@@ -365,8 +507,29 @@ func TestTmuxAutomaticReviewCycle(t *testing.T) {
 				return true
 			})
 			feedback := e.readLog("worker")[1]
+			if !strings.HasPrefix(feedback, "╭─ 2mux · REVIEWER → WORKER") {
+				t.Fatalf("incoming feedback has no visible role card: %q", feedback)
+			}
 			if !strings.Contains(feedback, "CORRECTIONS:\nFix the retry case.\nПеревір UTF-8.\n[2mux end of message ") {
 				t.Fatalf("multiline feedback corrupted: %q", feedback)
+			}
+		}},
+		{"LegacyHooksOnlyObserve", func(t *testing.T) {
+			transport := &nativeTransport{dir: e.runtime, panes: paneWatch{}}
+			defer os.Remove(filepath.Join(e.runtime, roleReviewer+"-state.json"))
+			for _, state := range []agentState{
+				{Role: roleReviewer, State: "starting", Source: "claude-hooks", Updated: time.Now()},
+				{Role: roleReviewer, State: "busy", Source: "claude-hooks", Updated: time.Now().Add(-time.Hour)},
+				{Role: roleReviewer, State: "awaiting_approval", Source: "claude-hooks", Updated: time.Now().Add(-hookApprovalTTL - time.Second)},
+			} {
+				if err := writeJSON(filepath.Join(e.runtime, roleReviewer+"-state.json"), state); err != nil {
+					t.Fatal(err)
+				}
+				e.waitFor(t, "legacy readiness despite observing hook "+state.State, func() bool { return transport.ready(e.name, message{To: roleReviewer, Transport: "tmux"}) == nil })
+			}
+			writeAgentState(e.runtime, agentState{Role: roleReviewer, State: "awaiting_approval", Source: "claude-hooks"})
+			if err := transport.ready(e.name, message{To: roleReviewer, Transport: "tmux"}); err == nil || !strings.Contains(err.Error(), "awaiting_approval") {
+				t.Fatal("fresh approval observation did not hold delivery", err)
 			}
 		}},
 		{"BridgeRestartDoesNotReplay", func(t *testing.T) {
@@ -527,6 +690,14 @@ func TestTmuxAutomaticReviewCycle(t *testing.T) {
 			replacement := e.pane(t, "reviewer")
 			if replacement == reviewer || replacement == stray {
 				t.Fatalf("unexpected replacement reviewer pane %s", replacement)
+			}
+			label, err := tmux("show-option", "-p", "-v", "-t", replacement, "@twomux_role")
+			if err != nil || label != roleReviewer {
+				t.Fatalf("respawn did not restore the reviewer header: %q: %v", label, err)
+			}
+			strayHeader, err := tmux("display-message", "-p", "-t", stray, "#{E:pane-border-format}")
+			if err != nil || strings.Contains(strayHeader, "REVIEWER · Claude") {
+				t.Fatalf("stray pane inherited a reviewer header: %q: %v", strayHeader, err)
 			}
 		}},
 		{"StopAndOwnership", func(t *testing.T) {

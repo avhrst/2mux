@@ -61,3 +61,32 @@ func TestSendRejectsEmptyOptionsBeforeSessionDiscovery(t *testing.T) {
 		}
 	}
 }
+
+func TestExplicitQueueTypedReviewWithoutTmuxEnvironment(t *testing.T) {
+	dir := queueDir(t)
+	t.Setenv("TMUX", "")
+	t.Setenv("TMUX_PANE", "")
+	t.Setenv("PATH", t.TempDir())
+	if err := run([]string{"send", "--queue", dir, "--from", roleWorker, "--kind", "review_request", roleReviewer, "READY_FOR_REVIEW: check the documentation"}); err != nil {
+		t.Fatal(err)
+	}
+	messages, err := readMessages(dir)
+	if err != nil || len(messages) != 1 {
+		t.Fatalf("request records: %+v, %v", messages, err)
+	}
+	request := messages[0]
+	if request.Kind != "review_request" || request.From != roleWorker || request.To != roleReviewer {
+		t.Fatalf("wrong request: %+v", request)
+	}
+	if err := run([]string{"send", "--queue", dir, "--from", roleReviewer, "--kind", "verdict", "--reply-to", request.ID, "--verdict", "APPROVED", roleWorker, "APPROVED: checked the documentation"}); err != nil {
+		t.Fatal(err)
+	}
+	messages, err = readMessages(dir)
+	if err != nil || len(messages) != 2 {
+		t.Fatalf("review records: %+v, %v", messages, err)
+	}
+	verdict := messages[1]
+	if verdict.Kind != "verdict" || verdict.ReplyTo != request.ID || verdict.Verdict != "APPROVED" || verdict.From != roleReviewer || verdict.To != roleWorker {
+		t.Fatalf("wrong verdict: %+v", verdict)
+	}
+}
