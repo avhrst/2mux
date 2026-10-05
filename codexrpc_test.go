@@ -167,6 +167,7 @@ type fakeThreads struct {
 	mu        sync.Mutex
 	persisted map[string]bool
 	started   []map[string]any
+	resumes   []map[string]any
 	resumeErr *rpcError
 	startErr  *rpcError
 	nameErr   *rpcError
@@ -196,6 +197,7 @@ func (f *fakeThreads) handle(c *websocket.Conn, e rpcEnvelope) {
 		f.persisted[id] = true
 		writeRPC(c, map[string]any{"id": e.ID, "result": map[string]any{}})
 	case "thread/resume":
+		f.resumes = append(f.resumes, p)
 		if f.resumeErr != nil {
 			writeRPC(c, map[string]any{"id": e.ID, "error": f.resumeErr})
 		} else if !f.persisted[id] {
@@ -301,7 +303,7 @@ func TestMissingRolloutRequiresExactRPCError(t *testing.T) {
 }
 
 func TestWorkerThreadInvalidationSurvivesReplacementFailure(t *testing.T) {
-	for _, failure := range []string{"prompt", "start", "name"} {
+	for _, failure := range []string{"start", "name"} {
 		t.Run(failure, func(t *testing.T) {
 			f := &fakeThreads{persisted: map[string]bool{}}
 			switch failure {
@@ -316,17 +318,7 @@ func TestWorkerThreadInvalidationSurvivesReplacementFailure(t *testing.T) {
 			if err := writeSessionConfig(dir, cfg); err != nil {
 				t.Fatal(err)
 			}
-			prompt := func() (string, error) {
-				saved, err := readSessionConfig(dir)
-				if err != nil || saved.CodexThread != "" {
-					t.Errorf("invalid ID not cleared before replacement: %+v: %v", saved, err)
-				}
-				if failure == "prompt" {
-					return "", errors.New("prompt failed")
-				}
-				return rolePromptStub()
-			}
-			if _, err := ensureWorkerThread(ctx, r, dir, &cfg, prompt); err == nil {
+			if _, err := ensureWorkerThread(ctx, r, dir, &cfg, rolePromptStub); err == nil {
 				t.Fatal("replacement failure hidden")
 			}
 			saved, err := readSessionConfig(dir)
@@ -357,5 +349,52 @@ func TestWorkerThreadIdentityMismatchDoesNotReplaceOrChangeConfig(t *testing.T) 
 				t.Fatalf("identity mismatch changed thread/config: %+v: %v", saved, err)
 			}
 		})
+	}
+}
+
+func TestWorkerThreadResumesCarryRoleInstructions(t *testing.T) {
+	f := &fakeThreads{persisted: map[string]bool{}}
+	r, ctx := dialFakeThreads(t, f)
+	dir := queueDir(t)
+	cfg := sessionConfig{CWD: "/project"}
+	thread, err := ensureWorkerThread(ctx, r, dir, &cfg, rolePromptStub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ensureWorkerThread(ctx, r, dir, &cfg, rolePromptStub); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	// The first resume persists the new thread on its creating connection; the
+	// second is a later restart. Both must restore the role instructions, which
+	// Codex does not keep in the rollout.
+	if len(f.resumes) != 2 {
+		t.Fatalf("resumes: %v", f.resumes)
+	}
+	for _, p := range f.resumes {
+		if p["threadId"] != thread.ID || p["developerInstructions"] != "role" {
+			t.Fatalf("resume without role instructions: %v", p)
+		}
+	}
+}
+
+func TestWorkerThreadPromptFailureKeepsConfig(t *testing.T) {
+	f := &fakeThreads{persisted: map[string]bool{}}
+	r, ctx := dialFakeThreads(t, f)
+	dir := queueDir(t)
+	cfg := sessionConfig{CWD: "/project", CodexAPI: true, CodexThread: "stale"}
+	if err := writeSessionConfig(dir, cfg); err != nil {
+		t.Fatal(err)
+	}
+	failing := func() (string, error) { return "", errors.New("prompt failed") }
+	if _, err := ensureWorkerThread(ctx, r, dir, &cfg, failing); err == nil {
+		t.Fatal("prompt failure hidden")
+	}
+	saved, err := readSessionConfig(dir)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err != nil || saved.CodexThread != "stale" || len(f.resumes) != 0 || len(f.started) != 0 {
+		t.Fatalf("prompt failure touched thread or config: %+v %v", saved, err)
 	}
 }

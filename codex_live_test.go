@@ -2,6 +2,9 @@ package main
 
 import (
 	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -207,4 +210,117 @@ func TestRealCodexNativeTUIStartsAndRespawnsEmptyThread(t *testing.T) {
 		t.Fatalf("TUI startup changed thread or ran a turn: %+v: %v", resumed, err)
 	}
 	t.Log("installed native Codex TUI reached its prompt on first launch and respawn after backend restart; no model turns")
+}
+
+// Codex keeps developerInstructions only in the loaded thread. This opt-in check
+// restarts the installed backend and sends one turn to a local capture server
+// (never a model provider) to see which instructions reach the model.
+func TestRealCodexRoleInstructionsSurviveBackendRestart(t *testing.T) {
+	if os.Getenv("TWOMUX_CODEX_LIVE") != "1" {
+		t.Skip("set TWOMUX_CODEX_LIVE=1 to check role instructions against installed Codex")
+	}
+	path, err := exec.LookPath("codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, err := os.MkdirTemp("/tmp", "2mux-codex-live-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	cwd, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	requests := make(chan string, 16)
+	capture := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		requests <- string(body)
+		http.Error(w, `{"error":{"message":"2mux capture","type":"invalid_request_error"}}`, http.StatusBadRequest)
+	})}
+	go capture.Serve(listener)
+	t.Cleanup(func() { capture.Close() })
+	config := fmt.Sprintf("model = \"gpt-5\"\nmodel_provider = \"capture\"\n[model_providers.capture]\nname = \"capture\"\nbase_url = \"http://%s/v1\"\nwire_api = \"responses\"\nrequest_max_retries = 0\nstream_max_retries = 0\n", listener.Addr())
+	if err := os.WriteFile(filepath.Join(dir, "config.toml"), []byte(config), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CODEX_HOME", dir)
+	socket := filepath.Join(dir, "socket")
+	var backend *exec.Cmd
+	stop := func() {
+		if backend != nil {
+			backend.Process.Kill()
+			backend.Wait()
+			backend = nil
+		}
+	}
+	t.Cleanup(stop)
+	dial := func() *codexRPC {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			ctx, cancel := rpcTimeout()
+			r, err := dialCodex(ctx, socket)
+			cancel()
+			if err == nil {
+				t.Cleanup(r.close)
+				return r
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("Codex did not listen: %v", err)
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+	start := func() {
+		t.Helper()
+		os.Remove(socket)
+		backend = exec.Command(path, "app-server", "--listen", "unix://"+socket)
+		backend.Dir = cwd
+		if err := backend.Start(); err != nil {
+			t.Fatal(err)
+		}
+		dial().close()
+	}
+	const role = "2MUX-LIVE-ROLE-MARKER"
+	prompt := func() (string, error) { return role, nil }
+	start()
+	ctx, cancel := rpcTimeout()
+	defer cancel()
+	cfg := sessionConfig{CWD: cwd, CodexAPI: true}
+	r := dial()
+	if _, err := ensureWorkerThread(ctx, r, dir, &cfg, prompt); err != nil {
+		t.Fatal(err)
+	}
+	r.close()
+	// Longer than Codex keeps a disconnected, never-written thread loaded.
+	time.Sleep(3 * time.Second)
+	stop()
+	start()
+	// The bridge or respawn preflight resumes first; the TUI then resumes plainly.
+	r = dial()
+	if _, err := ensureWorkerThread(ctx, r, dir, &cfg, prompt); err != nil {
+		t.Fatal(err)
+	}
+	tui := dial()
+	if err := tui.call(ctx, "thread/resume", map[string]string{"threadId": cfg.CodexThread}, nil); err != nil {
+		t.Fatal(err)
+	}
+	input := []any{map[string]string{"type": "text", "text": "2mux live check"}}
+	if err := tui.call(ctx, "turn/start", map[string]any{"threadId": cfg.CodexThread, "input": input}, nil); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case body := <-requests:
+		if !strings.Contains(body, role) {
+			t.Fatal("role instructions missing from the model request after backend restart")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("no model request captured")
+	}
+	t.Log("role instructions reached the captured model request after backend restart")
 }

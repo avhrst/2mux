@@ -156,7 +156,7 @@ func TestNativeConnectPreservesThreadOnResumeErrorsAndIdentityMismatch(t *testin
 			if err := os.Symlink(fakeCodex(t, f.handle), filepath.Join(dir, "codex.sock")); err != nil {
 				t.Fatal(err)
 			}
-			tr := &nativeTransport{dir: dir, cfg: cfg}
+			tr := &nativeTransport{dir: dir, cfg: cfg, prompt: rolePromptStub}
 			defer tr.close()
 			if err := tr.connect(); err == nil {
 				t.Fatal("invalid resume accepted")
@@ -181,7 +181,7 @@ func TestNativeConnectFollowsSavedReplacementWhileConnected(t *testing.T) {
 	if err := os.Symlink(fakeCodex(t, f.handle), filepath.Join(dir, "codex.sock")); err != nil {
 		t.Fatal(err)
 	}
-	tr := &nativeTransport{dir: dir, cfg: cfg}
+	tr := &nativeTransport{dir: dir, cfg: cfg, prompt: rolePromptStub}
 	defer tr.close()
 	if err := tr.connect(); err != nil {
 		t.Fatal(err)
@@ -196,6 +196,17 @@ func TestNativeConnectFollowsSavedReplacementWhileConnected(t *testing.T) {
 	}
 	if tr.cfg.CodexThread != cfg.CodexThread || tr.rpc == old {
 		t.Fatal("bridge kept the old thread connection after saved replacement")
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	// After a backend restart the bridge's resume restores the role instructions.
+	for _, p := range f.resumes {
+		if p["developerInstructions"] != "role" {
+			t.Fatalf("bridge resumed without role instructions: %v", p)
+		}
+	}
+	if len(f.resumes) != 2 {
+		t.Fatalf("resumes: %d", len(f.resumes))
 	}
 }
 

@@ -184,16 +184,30 @@ func (t codexThread) validate(id, cwd string) error {
 
 // ensureWorkerThread returns a worker thread the native TUI can resume. The
 // role instructions are added without starting a model turn; user
-// model/sandbox/approval settings remain authoritative. Codex writes a thread's
-// rollout only after its first turn or a metadata change, and thread/resume
-// (including the TUI's) requires that rollout, so a new thread is named to
-// persist it immediately.
+// model/sandbox/approval settings remain authoritative.
+//
+// Codex keeps developerInstructions only in the loaded thread, not in its
+// rollout, so every resume passes them again: after a backend restart the
+// first resume reloads the thread from the rollout, and a resume of a loaded
+// thread replaces its instructions. A plain TUI resume keeps them.
+//
+// Codex writes a new thread's rollout only after its first turn, or when a
+// named thread is resumed while still loaded, and unloads a never-written
+// thread shortly after its last client disconnects. Naming and resuming the
+// new thread on the creating connection persists it before that can happen.
 func ensureWorkerThread(ctx context.Context, rpc *codexRPC, dir string, cfg *sessionConfig, prompt func() (string, error)) (codexThread, error) {
+	instructions, err := prompt()
+	if err != nil {
+		return codexThread{}, err
+	}
 	var response struct {
 		Thread codexThread `json:"thread"`
 	}
+	resume := func(id string) error {
+		return rpc.call(ctx, "thread/resume", map[string]any{"threadId": id, "developerInstructions": instructions}, &response)
+	}
 	if cfg.CodexThread != "" {
-		err := rpc.call(ctx, "thread/resume", map[string]any{"threadId": cfg.CodexThread}, &response)
+		err := resume(cfg.CodexThread)
 		if err == nil {
 			return response.Thread, response.Thread.validate(cfg.CodexThread, cfg.CWD)
 		}
@@ -208,20 +222,23 @@ func ensureWorkerThread(ctx context.Context, rpc *codexRPC, dir string, cfg *ses
 			return codexThread{}, err
 		}
 	}
-	instructions, err := prompt()
-	if err != nil {
-		return codexThread{}, err
-	}
 	if err := rpc.call(ctx, "thread/start", map[string]any{"cwd": cfg.CWD, "developerInstructions": instructions}, &response); err != nil {
 		return codexThread{}, err
 	}
 	if err := response.Thread.validate("", cfg.CWD); err != nil {
 		return codexThread{}, err
 	}
-	if err := rpc.call(ctx, "thread/name/set", map[string]any{"threadId": response.Thread.ID, "name": "2mux worker"}, nil); err != nil {
+	id := response.Thread.ID
+	if err := rpc.call(ctx, "thread/name/set", map[string]any{"threadId": id, "name": "2mux worker"}, nil); err != nil {
 		return codexThread{}, fmt.Errorf("persist codex thread: %w", err)
 	}
-	cfg.CodexThread = response.Thread.ID
+	if err := resume(id); err != nil {
+		return codexThread{}, fmt.Errorf("persist codex thread: %w", err)
+	}
+	if err := response.Thread.validate(id, cfg.CWD); err != nil {
+		return codexThread{}, err
+	}
+	cfg.CodexThread = id
 	if err := writeSessionConfig(dir, *cfg); err != nil {
 		return codexThread{}, err
 	}
@@ -239,6 +256,8 @@ type nativeTransport struct {
 	cfg   sessionConfig
 	rpc   *codexRPC
 	panes paneWatch
+	// prompt builds the worker role instructions; nil uses rolePrompt.
+	prompt func() (string, error)
 }
 
 func (t *nativeTransport) close() {
@@ -278,7 +297,11 @@ func (t *nativeTransport) connect() error {
 	if err != nil {
 		return err
 	}
-	thread, err := ensureWorkerThread(ctx, r, t.dir, &t.cfg, func() (string, error) { return rolePrompt(sessionName(t.cfg.CWD), roleWorker) })
+	prompt := t.prompt
+	if prompt == nil {
+		prompt = func() (string, error) { return rolePrompt(sessionName(t.cfg.CWD), roleWorker) }
+	}
+	thread, err := ensureWorkerThread(ctx, r, t.dir, &t.cfg, prompt)
 	if err != nil {
 		r.close()
 		return err
